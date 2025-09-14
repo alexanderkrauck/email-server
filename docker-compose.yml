@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  email-server:
+    build: .
+    container_name: email-server
+    ports:
+      - "8002:8000"  # HTTP API
+      - "2525:2525"  # SMTP port (if needed for future SMTP server functionality)
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    environment:
+      - EMAILSERVER_DATABASE_URL=sqlite:////app/data/emailserver.db
+      - EMAILSERVER_LOG_FILE=/app/data/emailserver.log
+      - EMAILSERVER_EMAIL_LOG_DIR=/app/data/emails
+      - EMAILSERVER_API_HOST=0.0.0.0
+      - EMAILSERVER_API_PORT=8000
+      - EMAILSERVER_LOG_LEVEL=INFO
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  email_data:
+    driver: local

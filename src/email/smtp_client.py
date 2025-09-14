@@ -24,14 +24,18 @@ class SMTPClient:
     async def connect(self) -> bool:
         """Connect to the IMAP server."""
         try:
+            # Use IMAP-specific SSL/TLS settings
+            imap_use_ssl = getattr(self.config, 'imap_use_ssl', True)
+            imap_use_tls = getattr(self.config, 'imap_use_tls', False)
+
             # Create SSL context
             ssl_context = ssl.create_default_context()
-            if not self.config.use_ssl:
+            if not imap_use_ssl:
                 ssl_context.check_hostname = False
                 ssl_context.verify_mode = ssl.CERT_NONE
 
             # Connect to IMAP server
-            if self.config.use_ssl:
+            if imap_use_ssl:
                 self.client = aioimaplib.IMAP4_SSL(
                     host=self.config.host,
                     port=self.config.port,
@@ -46,7 +50,7 @@ class SMTPClient:
             await self.client.wait_hello_from_server()
 
             # Start TLS if required
-            if self.config.use_tls and not self.config.use_ssl:
+            if imap_use_tls and not imap_use_ssl:
                 await self.client.starttls(ssl_context=ssl_context)
 
             # Login

@@ -33,10 +33,13 @@ class SMTPConfigCreate(BaseModel):
     account_name: str = None
     host: str
     port: int = 993
+    smtp_port: int = 587
     username: str
     password: str
-    use_tls: bool = True
-    use_ssl: bool = False
+    imap_use_ssl: bool = True
+    imap_use_tls: bool = False
+    smtp_use_ssl: bool = False
+    smtp_use_tls: bool = True
     enabled: bool = True
 
 
@@ -45,10 +48,13 @@ class SMTPConfigUpdate(BaseModel):
     account_name: str = None
     host: str = None
     port: int = None
+    smtp_port: int = None
     username: str = None
     password: str = None
-    use_tls: bool = None
-    use_ssl: bool = None
+    imap_use_ssl: bool = None
+    imap_use_tls: bool = None
+    smtp_use_ssl: bool = None
+    smtp_use_tls: bool = None
     enabled: bool = None
 
 
@@ -58,9 +64,12 @@ class SMTPConfigResponse(BaseModel):
     account_name: str = None
     host: str
     port: int
+    smtp_port: int
     username: str
-    use_tls: bool
-    use_ssl: bool
+    imap_use_ssl: bool
+    imap_use_tls: bool
+    smtp_use_ssl: bool
+    smtp_use_tls: bool
     enabled: bool
     created_at: str
     last_check: str = None

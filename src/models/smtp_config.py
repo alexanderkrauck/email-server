@@ -15,11 +15,16 @@ class SMTPConfig(Base):
     name = Column(String(255), unique=True, nullable=False)
     account_name = Column(String(255), nullable=True)  # For organizing storage by account
     host = Column(String(255), nullable=False)
-    port = Column(Integer, nullable=False, default=993)
+    port = Column(Integer, nullable=False, default=993)  # IMAP port
+    smtp_port = Column(Integer, nullable=False, default=465)  # SMTP port
     username = Column(String(255), nullable=False)
     password = Column(Text, nullable=False)  # Should be encrypted in production
-    use_tls = Column(Boolean, default=True)
-    use_ssl = Column(Boolean, default=False)
+    # IMAP settings
+    imap_use_ssl = Column(Boolean, default=True)  # IMAP typically uses SSL on 993
+    imap_use_tls = Column(Boolean, default=False)
+    # SMTP settings
+    smtp_use_ssl = Column(Boolean, default=False)  # SMTP on 587 uses TLS, on 465 uses SSL
+    smtp_use_tls = Column(Boolean, default=True)
     enabled = Column(Boolean, default=True)
 
     # Timestamps
@@ -41,9 +46,12 @@ class SMTPConfig(Base):
             'account_name': self.account_name,
             'host': self.host,
             'port': self.port,
+            'smtp_port': self.smtp_port,
             'username': self.username,
-            'use_tls': self.use_tls,
-            'use_ssl': self.use_ssl,
+            'imap_use_ssl': self.imap_use_ssl,
+            'imap_use_tls': self.imap_use_tls,
+            'smtp_use_ssl': self.smtp_use_ssl,
+            'smtp_use_tls': self.smtp_use_tls,
             'enabled': self.enabled,
             'created_at': self.created_at.isoformat() if self.created_at else "",
             'updated_at': self.updated_at.isoformat() if self.updated_at else "",

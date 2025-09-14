@@ -25,12 +25,20 @@ class EmailSender:
     async def connect(self) -> bool:
         """Connect to SMTP server."""
         try:
-            # Create SMTP connection
-            if self.config.use_ssl:
-                self._server = smtplib.SMTP_SSL(self.config.host, self.config.port)
+            # Create SMTP connection using smtp_port if available, otherwise fall back to port
+            smtp_port = getattr(self.config, 'smtp_port', self.config.port)
+
+            # Use specific SMTP SSL/TLS settings
+            smtp_use_ssl = getattr(self.config, 'smtp_use_ssl', False)
+            smtp_use_tls = getattr(self.config, 'smtp_use_tls', True)
+
+            if smtp_use_ssl:
+                # Use SSL connection (typically port 465)
+                self._server = smtplib.SMTP_SSL(self.config.host, smtp_port, timeout=10)
             else:
-                self._server = smtplib.SMTP(self.config.host, self.config.port)
-                if self.config.use_tls:
+                # Use regular connection with optional TLS (typically port 587)
+                self._server = smtplib.SMTP(self.config.host, smtp_port, timeout=10)
+                if smtp_use_tls:
                     context = ssl.create_default_context()
                     self._server.starttls(context=context)
 
@@ -91,8 +99,11 @@ class EmailSender:
             # Create message
             msg = MIMEMultipart('mixed')
 
-            # Set headers
-            msg['From'] = self.config.username
+            # Set headers - use account_name if available, otherwise username
+            from_email = getattr(self.config, 'account_name', self.config.username)
+            if not from_email or '@' not in from_email:
+                from_email = self.config.username  # fallback
+            msg['From'] = from_email
             msg['To'] = ', '.join(to_addresses)
             msg['Subject'] = subject
             msg['Date'] = datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S +0000')
@@ -254,8 +265,32 @@ class EmailSenderManager:
                 if not config.enabled:
                     return {"success": False, "message": f"SMTP config {config.name} is disabled"}
 
-                sender = await self.get_sender(config)
-                return await sender.send_email(**email_args)
+                # Create a detached config object with all needed attributes
+                config_data = {
+                    'id': config.id,
+                    'name': config.name,
+                    'account_name': config.account_name,
+                    'host': config.host,
+                    'port': config.port,
+                    'smtp_port': getattr(config, 'smtp_port', 587),
+                    'username': config.username,
+                    'password': config.password,
+                    'imap_use_ssl': getattr(config, 'imap_use_ssl', True),
+                    'imap_use_tls': getattr(config, 'imap_use_tls', False),
+                    'smtp_use_ssl': getattr(config, 'smtp_use_ssl', False),
+                    'smtp_use_tls': getattr(config, 'smtp_use_tls', True),
+                    'enabled': config.enabled
+                }
+
+            # Create a temporary config object outside the session
+            class TempConfig:
+                def __init__(self, data):
+                    for key, value in data.items():
+                        setattr(self, key, value)
+
+            temp_config = TempConfig(config_data)
+            sender = await self.get_sender(temp_config)
+            return await sender.send_email(**email_args)
 
         except Exception as e:
             error_msg = f"Error sending email via config {smtp_config_id}: {e}"

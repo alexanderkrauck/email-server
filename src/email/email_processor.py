@@ -57,11 +57,32 @@ class EmailProcessor:
                 logger.debug("No enabled SMTP configurations found")
                 return
 
-            # Process each server
-            tasks = []
+            # Create detached config copies to avoid session issues
+            config_copies = []
             for config in configs:
-                task = asyncio.create_task(self._process_server(config))
-                tasks.append(task)
+                # Create a detached copy with all needed attributes
+                config_copy = type('ConfigCopy', (), {})()
+                config_copy.id = config.id
+                config_copy.name = config.name
+                config_copy.account_name = config.account_name
+                config_copy.host = config.host
+                config_copy.port = config.port
+                config_copy.smtp_host = getattr(config, 'smtp_host', None)
+                config_copy.smtp_port = getattr(config, 'smtp_port', 587)
+                config_copy.username = config.username
+                config_copy.password = config.password
+                config_copy.imap_use_ssl = getattr(config, 'imap_use_ssl', True)
+                config_copy.imap_use_tls = getattr(config, 'imap_use_tls', False)
+                config_copy.smtp_use_ssl = getattr(config, 'smtp_use_ssl', False)
+                config_copy.smtp_use_tls = getattr(config, 'smtp_use_tls', True)
+                config_copy.enabled = config.enabled
+                config_copies.append(config_copy)
+
+        # Process each server with detached config copies
+        tasks = []
+        for config_copy in config_copies:
+            task = asyncio.create_task(self._process_server(config_copy))
+            tasks.append(task)
 
             # Wait for all servers to complete
             if tasks:

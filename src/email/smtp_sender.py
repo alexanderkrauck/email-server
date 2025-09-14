@@ -25,7 +25,8 @@ class EmailSender:
     async def connect(self) -> bool:
         """Connect to SMTP server."""
         try:
-            # Create SMTP connection using smtp_port if available, otherwise fall back to port
+            # Create SMTP connection using smtp_host/smtp_port if available, otherwise fall back to host/port
+            smtp_host = getattr(self.config, 'smtp_host', None) or self.config.host
             smtp_port = getattr(self.config, 'smtp_port', self.config.port)
 
             # Use specific SMTP SSL/TLS settings
@@ -34,10 +35,10 @@ class EmailSender:
 
             if smtp_use_ssl:
                 # Use SSL connection (typically port 465)
-                self._server = smtplib.SMTP_SSL(self.config.host, smtp_port, timeout=10)
+                self._server = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=10)
             else:
                 # Use regular connection with optional TLS (typically port 587)
-                self._server = smtplib.SMTP(self.config.host, smtp_port, timeout=10)
+                self._server = smtplib.SMTP(smtp_host, smtp_port, timeout=10)
                 if smtp_use_tls:
                     context = ssl.create_default_context()
                     self._server.starttls(context=context)
@@ -272,6 +273,7 @@ class EmailSenderManager:
                     'account_name': config.account_name,
                     'host': config.host,
                     'port': config.port,
+                    'smtp_host': getattr(config, 'smtp_host', None),
                     'smtp_port': getattr(config, 'smtp_port', 587),
                     'username': config.username,
                     'password': config.password,

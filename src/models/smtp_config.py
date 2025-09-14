@@ -14,8 +14,9 @@ class SMTPConfig(Base):
     id = Column(Integer, primary_key=True)
     name = Column(String(255), unique=True, nullable=False)
     account_name = Column(String(255), nullable=True)  # For organizing storage by account
-    host = Column(String(255), nullable=False)
+    host = Column(String(255), nullable=False)  # IMAP host
     port = Column(Integer, nullable=False, default=993)  # IMAP port
+    smtp_host = Column(String(255), nullable=True)  # SMTP host (if different from IMAP)
     smtp_port = Column(Integer, nullable=False, default=465)  # SMTP port
     username = Column(String(255), nullable=False)
     password = Column(Text, nullable=False)  # Should be encrypted in production
@@ -46,6 +47,7 @@ class SMTPConfig(Base):
             'account_name': self.account_name,
             'host': self.host,
             'port': self.port,
+            'smtp_host': self.smtp_host,
             'smtp_port': self.smtp_port,
             'username': self.username,
             'imap_use_ssl': self.imap_use_ssl,

@@ -70,7 +70,8 @@ def init_database():
             ("imap_use_ssl", "BOOLEAN DEFAULT 1"),
             ("imap_use_tls", "BOOLEAN DEFAULT 0"),
             ("smtp_use_ssl", "BOOLEAN DEFAULT 0"),
-            ("smtp_use_tls", "BOOLEAN DEFAULT 1")
+            ("smtp_use_tls", "BOOLEAN DEFAULT 1"),
+            ("smtp_host", "TEXT NULL")
         ]
 
         for column_name, column_def in columns_to_add:

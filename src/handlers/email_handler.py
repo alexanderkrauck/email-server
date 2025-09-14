@@ -33,6 +33,7 @@ class SMTPConfigCreate(BaseModel):
     account_name: str = None
     host: str
     port: int = 993
+    smtp_host: str = None
     smtp_port: int = 587
     username: str
     password: str
@@ -48,6 +49,7 @@ class SMTPConfigUpdate(BaseModel):
     account_name: str = None
     host: str = None
     port: int = None
+    smtp_host: str = None
     smtp_port: int = None
     username: str = None
     password: str = None
@@ -64,6 +66,7 @@ class SMTPConfigResponse(BaseModel):
     account_name: str = None
     host: str
     port: int
+    smtp_host: str = None
     smtp_port: int
     username: str
     imap_use_ssl: bool

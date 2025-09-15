@@ -82,52 +82,95 @@ class SMTPClient:
                 logger.error(f"Error disconnecting from {self.config.name}: {e}")
 
     async def fetch_new_emails(self, limit: int = None) -> List[Dict]:
-        """Fetch new emails from the server."""
+        """Fetch new emails from all folders on the server."""
         if not self._connected:
             if not await self.connect():
                 return []
 
         try:
-            # Select inbox
-            await self.client.select("INBOX")
-
-            # Search for all emails
-            search_response = await self.client.search("ALL")
-            if search_response.result != "OK":
-                logger.warning(f"Search failed for {self.config.name}")
+            # Get list of all folders
+            list_response = await self.client.list('""', '*')
+            if list_response.result != "OK":
+                logger.warning(f"Failed to list folders for {self.config.name}")
                 return []
 
-            # Get message UIDs
-            message_ids = search_response.lines[0].decode().split()
-            if not message_ids:
-                logger.debug(f"No emails found for {self.config.name}")
-                return []
+            # Parse folder names from the response
+            folders = []
+            for line in list_response.lines:
+                # Parse IMAP LIST response format
+                # Example: (\HasNoChildren) "/" "INBOX"
+                # or: (\HasNoChildren) "." "INBOX.Sent"
+                decoded = line.decode('utf-8', errors='ignore')
+                # Extract folder name - it's usually the last quoted string
+                import re
+                matches = re.findall(r'"([^"]+)"', decoded)
+                if matches and len(matches) >= 2:
+                    # The last match is usually the folder name
+                    folder_name = matches[-1]
+                    # Skip hierarchy delimiters returned as folders
+                    if folder_name not in ['.', '/', '\\']:
+                        folders.append(folder_name)
 
-            # Limit the number of emails to process (if limit specified)
-            if limit and len(message_ids) > limit:
-                message_ids = message_ids[-limit:]
+            if not folders:
+                # Fallback to INBOX if no folders found
+                folders = ["INBOX"]
 
-            emails = []
-            for msg_id in message_ids:
+            logger.info(f"Found {len(folders)} folders for {self.config.name}: {folders}")
+
+            all_emails = []
+            for folder in folders:
                 try:
-                    # Fetch email
-                    fetch_response = await self.client.fetch(msg_id, "(RFC822)")
-                    if fetch_response.result == "OK":
-                        raw_email = fetch_response.lines[1]
-                        email_data = await self._parse_email(raw_email, msg_id)
-                        if email_data:
-                            emails.append(email_data)
+                    # Select the folder
+                    select_response = await self.client.select(f'"{folder}"')
+                    if select_response.result != "OK":
+                        logger.debug(f"Cannot select folder {folder} for {self.config.name}, skipping")
+                        continue
 
-                        # Don't mark as seen - preserve original read status
-                    else:
-                        logger.warning(f"Failed to fetch message {msg_id} from {self.config.name}")
+                    # Search for all emails in this folder
+                    search_response = await self.client.search("ALL")
+                    if search_response.result != "OK":
+                        logger.warning(f"Search failed in folder {folder} for {self.config.name}")
+                        continue
+
+                    # Get message UIDs
+                    message_ids = search_response.lines[0].decode().split()
+                    if not message_ids:
+                        logger.debug(f"No emails found in folder {folder} for {self.config.name}")
+                        continue
+
+                    # Limit the number of emails to process per folder (if limit specified)
+                    if limit and len(message_ids) > limit:
+                        message_ids = message_ids[-limit:]
+
+                    folder_emails = []
+                    for msg_id in message_ids:
+                        try:
+                            # Fetch email
+                            fetch_response = await self.client.fetch(msg_id, "(RFC822)")
+                            if fetch_response.result == "OK":
+                                raw_email = fetch_response.lines[1]
+                                email_data = await self._parse_email(raw_email, msg_id)
+                                if email_data:
+                                    folder_emails.append(email_data)
+
+                                # Don't mark as seen - preserve original read status
+                            else:
+                                logger.warning(f"Failed to fetch message {msg_id} from folder {folder} in {self.config.name}")
+
+                        except Exception as e:
+                            logger.error(f"Error processing message {msg_id} from folder {folder} in {self.config.name}: {e}")
+                            continue
+
+                    if folder_emails:
+                        logger.info(f"Fetched {len(folder_emails)} emails from folder {folder} in {self.config.name}")
+                        all_emails.extend(folder_emails)
 
                 except Exception as e:
-                    logger.error(f"Error processing message {msg_id} from {self.config.name}: {e}")
+                    logger.error(f"Error processing folder {folder} for {self.config.name}: {e}")
                     continue
 
-            logger.info(f"Fetched {len(emails)} emails from {self.config.name}")
-            return emails
+            logger.info(f"Total fetched {len(all_emails)} emails from all folders in {self.config.name}")
+            return all_emails
 
         except Exception as e:
             logger.error(f"Error fetching emails from {self.config.name}: {e}")

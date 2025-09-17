@@ -63,10 +63,10 @@ class SMTPConfigUpdate(BaseModel):
 class SMTPConfigResponse(BaseModel):
     id: int
     name: str
-    account_name: str = None
+    account_name: Optional[str] = None
     host: str
     port: int
-    smtp_host: str = None
+    smtp_host: Optional[str] = None
     smtp_port: int
     username: str
     imap_use_ssl: bool
@@ -75,7 +75,7 @@ class SMTPConfigResponse(BaseModel):
     smtp_use_tls: bool
     enabled: bool
     created_at: str
-    last_check: str = None
+    last_check: Optional[str] = None
     total_emails_processed: int
 
     class Config:

@@ -8,6 +8,7 @@ RUN apk add --no-cache \
     libffi-dev \
     openssl-dev \
     python3-dev \
+    curl \
     && rm -rf /var/cache/apk/*
 
 # Set working directory

@@ -5,8 +5,8 @@ services:
     build: .
     container_name: email-server
     ports:
-      - "8002:8000"  # HTTP API
-      - "2525:2525"  # SMTP port (if needed for future SMTP server functionality)
+      - "127.0.0.1:8002:8000"  # HTTP API - localhost only
+      - "127.0.0.1:2525:2525"  # SMTP port - localhost only
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs

@@ -27,7 +27,7 @@ email_sender_manager = EmailSenderManager()
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1")
+router = APIRouter()
 
 # Global processor instance
 email_processor = EmailProcessor()
@@ -168,6 +168,12 @@ class EmailForwardRequest(BaseModel):
     include_attachments: bool = True
 
 
+class AttachmentInfo(BaseModel):
+    filename: str
+    content_type: Optional[str] = None
+    size: int = 0
+
+
 class SearchResult(BaseModel):
     id: int
     sender: str
@@ -176,6 +182,7 @@ class SearchResult(BaseModel):
     email_date: Optional[str] = None
     processed_at: str
     attachment_count: int
+    attachments: List[AttachmentInfo] = []
     matched_field: str
     preview: str
     file_path: str
@@ -390,12 +397,18 @@ async def list_emails(skip: int = 0, limit: int = 50, db: Session = Depends(get_
 
 @router.get("/emails/search", response_model=List[SearchResult])
 async def search_emails(
-    query: str,
+    query: str = "",
     search_attachments: bool = False,
     field: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     smtp_config_id: Optional[int] = None,
+    has_attachments: bool = False,
+    sort_by: str = "email_date",
+    sort_order: str = "desc",
+    participant: Optional[str] = None,
+    from_me: bool = False,
+    to_me: bool = False,
     skip: int = 0,
     limit: int = 50,
     db: Session = Depends(get_db)
@@ -411,10 +424,11 @@ async def search_emails(
     ## Parameters
     
     ### Required
-    - **query** (str): Regex pattern. Examples:
+    - **query** (str, default=""): Regex pattern. Examples:
       - "invoice" - simple word search
       - "invoice|receipt|bill" - OR pattern  
       - "^From:.*@company\\.com" - regex (escape dots with double backslash)
+      - "" (empty) - returns all emails matching filters
     
     ### Filtering
     - **search_attachments** (bool, default=False): Include attachment text in search
@@ -428,10 +442,24 @@ async def search_emails(
     - **date_from** (str, optional): Filter emails after date (ISO format: "2024-01-15")
     - **date_to** (str, optional): Filter emails before date (ISO format: "2024-12-31")
     - **smtp_config_id** (int, optional): Filter by account ID (see GET /api/v1/smtp-configs)
+    - **has_attachments** (bool, default=False): Only return emails with attachments
+    - **participant** (str, optional): Match sender OR recipient (partial match)
+    - **from_me** (bool, default=False): Only emails sent from this account
+    - **to_me** (bool, default=False): Only emails sent to this account
+    
+    ### Sorting
+    - **sort_by** (str, default="email_date"): Sort field
+      - "email_date" - when email was sent
+      - "processed_at" - when email was processed
+      - "sender" - sender address
+      - "subject" - subject line
+    - **sort_order** (str, default="desc"): Sort direction
+      - "desc" - newest/ZA first
+      - "asc" - oldest/AZ first
     
     ### Pagination
     - **skip** (int, default=0): Offset for pagination
-    - **limit** (int, default=50): Max results to return
+    - **limit** (int, default=50): Max results to return (max 100)
     
     ## Common Use Cases (Verified Example Calls)
     
@@ -457,12 +485,24 @@ async def search_emails(
         limit=25
     )
     
-    ### Get emails with attachments only (via date filter + search pattern ".")
-    search_emails(query=".", date_from="2024-01-01", limit=50)
-    # Note: attachment_count in results indicates attachments exist
+    ### Get emails with attachments only (now easier!)
+    search_emails(has_attachments=True, limit=50)
     
-    ### Exclude attachments from search (faster)
-    search_emails(query="invoice", search_attachments=False, limit=10)
+    ### Get emails from/to me (chronologically last 20)
+    search_emails(to_me=True, sort_by="email_date", sort_order="desc", limit=20)
+    
+    ### Search participant (sender OR recipient)
+    search_emails(participant="krauck", limit=20)
+    
+    ### Get last 20 attachments sent from or to me
+    search_emails(
+        query="",
+        has_attachments=True,
+        participant="alexander.krauck@krauck-systems.com",
+        sort_by="email_date",
+        sort_order="desc",
+        limit=20
+    )
     
     ## Returns
     
@@ -476,6 +516,7 @@ async def search_emails(
     - **email_date**: Date from email headers
     - **processed_at**: When email was processed
     - **attachment_count**: Number of attachments
+    - **attachments**: List of attachment info (filename, content_type, size)
     
     ## Next Step: Get Full Content
     
@@ -488,11 +529,38 @@ async def search_emails(
     """
     from datetime import datetime
     
+    # Get the account email for from_me/to_me filters
+    account_email = None
+    if smtp_config_id:
+        config = db.query(SMTPConfig).filter(SMTPConfig.id == smtp_config_id).first()
+        if config:
+            account_email = config.username
+    
     q = db.query(EmailLog)
     
     if smtp_config_id:
         q = q.filter(EmailLog.smtp_config_id == smtp_config_id)
     
+    # has_attachments filter
+    if has_attachments:
+        q = q.filter(EmailLog.attachment_count > 0)
+    
+    # participant filter (sender OR recipient)
+    if participant:
+        q = q.filter(
+            (EmailLog.sender.ilike(f"%{participant}%")) | 
+            (EmailLog.recipient.ilike(f"%{participant}%"))
+        )
+    
+    # from_me filter
+    if from_me and account_email:
+        q = q.filter(EmailLog.sender.ilike(f"%{account_email}%"))
+    
+    # to_me filter
+    if to_me and account_email:
+        q = q.filter(EmailLog.recipient.ilike(f"%{account_email}%"))
+    
+    # date filters
     if date_from:
         try:
             from_date = datetime.fromisoformat(date_from)
@@ -507,8 +575,50 @@ async def search_emails(
         except ValueError:
             pass
     
+    # sorting
+    sort_column = EmailLog.email_date
+    if sort_by == "processed_at":
+        sort_column = EmailLog.processed_at
+    elif sort_by == "sender":
+        sort_column = EmailLog.sender
+    elif sort_by == "subject":
+        sort_column = EmailLog.subject
+    
+    if sort_order == "asc":
+        q = q.order_by(sort_column.asc())
+    else:
+        q = q.order_by(sort_column.desc())
+    
     email_logs = q.all()
     email_ids = [e.id for e in email_logs]
+    
+    # If query is empty, return results directly without search
+    if not query:
+        result = []
+        for email in email_logs:
+            attachments = db.query(EmailAttachment).filter(
+                EmailAttachment.email_log_id == email.id
+            ).all()
+            result.append(SearchResult(
+                id=email.id,
+                sender=email.sender,
+                recipient=email.recipient,
+                subject=email.subject or "",
+                email_date=email.email_date.isoformat() if email.email_date else None,
+                processed_at=email.processed_at.isoformat(),
+                attachment_count=email.attachment_count,
+                attachments=[
+                    AttachmentInfo(
+                        filename=a.filename,
+                        content_type=a.content_type,
+                        size=a.size
+                    ) for a in attachments
+                ],
+                matched_field="metadata",
+                preview="",
+                file_path=email.log_file_path or ""
+            ))
+        return result[:limit]
     
     search_service = SearchService()
     
@@ -535,6 +645,9 @@ async def search_emails(
     for match in matches:
         email = next((e for e in email_logs if e.id == match.email_id), None)
         if email:
+            attachments = db.query(EmailAttachment).filter(
+                EmailAttachment.email_log_id == email.id
+            ).all()
             result.append(SearchResult(
                 id=email.id,
                 sender=email.sender,
@@ -543,6 +656,13 @@ async def search_emails(
                 email_date=email.email_date.isoformat() if email.email_date else None,
                 processed_at=email.processed_at.isoformat(),
                 attachment_count=email.attachment_count,
+                attachments=[
+                    AttachmentInfo(
+                        filename=a.filename,
+                        content_type=a.content_type,
+                        size=a.size
+                    ) for a in attachments
+                ],
                 matched_field=match.matched_field,
                 preview=match.preview,
                 file_path=match.file_path

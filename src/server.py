@@ -122,7 +122,7 @@ async def combined_lifespan(final_app: FastAPI):
     await email_processor.stop_processing()
 
     # Cleanup email senders
-    from handlers.email_handler import email_sender_manager
+    from src.handlers.email_handler import email_sender_manager
     email_sender_manager.cleanup()
 
     # Cancel processing task

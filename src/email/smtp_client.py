@@ -220,10 +220,13 @@ class SMTPClient:
             if msg.is_multipart():
                 for part in msg.walk():
                     content_type = part.get_content_type()
+                    payload = part.get_payload(decode=True)
+                    if payload is None:
+                        continue
                     if content_type == "text/plain":
-                        body_plain += part.get_payload(decode=True).decode('utf-8', errors='ignore')
+                        body_plain += payload.decode('utf-8', errors='ignore')
                     elif content_type == "text/html":
-                        body_html += part.get_payload(decode=True).decode('utf-8', errors='ignore')
+                        body_html += payload.decode('utf-8', errors='ignore')
             else:
                 content_type = msg.get_content_type()
                 payload = msg.get_payload(decode=True)

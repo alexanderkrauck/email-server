@@ -89,19 +89,14 @@ async def test_log_email_creates_meta_file(temp_dir, sample_email_data):
         assert meta["sender"] == "test@example.com"
 
 
-@pytest.mark.asyncio
-async def test_sanitize_filename():
-    """Test filename sanitization."""
-    from src.email.email_logger import EmailLogger
+def test_sanitize_filename():
+    """Test shared filename sanitization."""
+    from src.email import sanitize_filename
 
-    with patch("src.email.email_logger.settings") as mock_settings:
-        mock_settings.email_log_dir = "/tmp/test"
-        
-        logger = EmailLogger()
-        
-        assert logger._sanitize_filename("normal_file.txt") == "normal_file.txt"
-        assert logger._sanitize_filename("file<>:.txt") == "file___.txt"
-        assert logger._sanitize_filename("") == "unnamed"
+    assert sanitize_filename("normal_file.txt") == "normal_file.txt"
+    assert sanitize_filename("") == "unknown"
+    # @ is stripped by the filename sanitizer (not meant for account names)
+    assert "@" not in sanitize_filename("user@example.com")
 
 
 @pytest.mark.asyncio
@@ -124,25 +119,35 @@ async def test_get_log_files(temp_dir):
 
 
 @pytest.mark.asyncio
-async def test_log_attachment_text(temp_dir):
-    """Test logging attachment text."""
+async def test_cleanup_old_logs_skips_attachments(temp_dir):
+    """Test that cleanup_old_logs does not delete attachment text files."""
     from src.email.email_logger import EmailLogger
+    import os
+    import time
 
     with patch("src.email.email_logger.settings") as mock_settings:
         mock_settings.email_log_dir = temp_dir
-        
+
         logger = EmailLogger()
-        
-        result = await logger.log_attachment_text(
-            1, 
-            "test@example.com",
-            {"filename": "test.txt"},
-            "Attachment content"
-        )
-        
-        assert result is not None
-        assert Path(result).exists()
-        assert "Attachment content" in Path(result).read_text()
+
+        # Create an old email log file
+        email_file = Path(temp_dir) / "old_email.txt"
+        email_file.write_text("email content")
+        old_time = time.time() - (60 * 24 * 3600)  # 60 days ago
+        os.utime(email_file, (old_time, old_time))
+
+        # Create an old attachment text file
+        att_dir = Path(temp_dir) / "attachments"
+        att_dir.mkdir()
+        att_file = att_dir / "1_test.txt"
+        att_file.write_text("attachment text")
+        os.utime(att_file, (old_time, old_time))
+
+        deleted = await logger.cleanup_old_logs(days_old=30)
+
+        assert deleted == 1  # Only the email file
+        assert not email_file.exists()
+        assert att_file.exists()  # Attachment file preserved
 
 
 @pytest.mark.asyncio

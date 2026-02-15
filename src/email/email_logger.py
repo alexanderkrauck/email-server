@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from src.config import settings
-from src.email.markdown_converter import EmailToMarkdownConverter
 from src.email.text_extractor import TextExtractor
 
 logger = logging.getLogger(__name__)
@@ -18,7 +17,6 @@ class EmailLogger:
 
     def __init__(self):
         self.log_dir = Path(settings.email_log_dir)
-        self.markdown_converter = EmailToMarkdownConverter()
         self._ensure_log_directory()
 
     def _ensure_log_directory(self):
@@ -63,9 +61,7 @@ class EmailLogger:
     async def _write_text_file(self, file_path: Path, email_data: Dict, email_id: int):
         """Write email content as plain text."""
         text_extractor = TextExtractor()
-        from src.storage_config.resolver import resolve_storage_config
-        config = resolve_storage_config()
-        
+
         body_text = email_data.get("body_plain", "")
         
         if not body_text and email_data.get("body_html"):
@@ -103,62 +99,6 @@ class EmailLogger:
         with open(file_path, 'w', encoding='utf-8') as f:
             json.dump(meta, f, indent=2, ensure_ascii=False)
 
-    async def log_attachment_text(self, email_id: int, account_email: str, attachment_data: Dict, text_content: str) -> Optional[str]:
-        """Log extracted text from attachment."""
-        try:
-            account_dir = self._get_account_directory(account_email, None)
-            attachments_dir = account_dir / "emails" / "attachments"
-            attachments_dir.mkdir(parents=True, exist_ok=True)
-            
-            safe_filename = self._sanitize_filename(attachment_data.get("filename", "attachment"))
-            text_path = attachments_dir / f"{email_id}_{safe_filename}.txt"
-            
-            with open(text_path, 'w', encoding='utf-8') as f:
-                f.write(text_content)
-            
-            return str(text_path)
-            
-        except Exception as e:
-            logger.error(f"Error logging attachment text: {e}")
-            return None
-
-    def get_attachment_text_path(self, email_id: int, account_email: str, filename: str) -> Optional[Path]:
-        """Get path to attachment text file."""
-        account_dir = self._get_account_directory(account_email, None)
-        safe_filename = self._sanitize_filename(filename)
-        text_path = account_dir / "emails" / "attachments" / f"{email_id}_{safe_filename}.txt"
-        
-        if text_path.exists():
-            return text_path
-        return None
-
-    def _sanitize_filename(self, filename: str) -> str:
-        """Sanitize filename by removing invalid characters."""
-        if not filename:
-            return "unnamed"
-        invalid_chars = '<>:"/\\|?*'
-        for char in invalid_chars:
-            filename = filename.replace(char, '_')
-        return filename[:200]
-
-    async def log_raw_email(self, raw_email: bytes, email_id: int, sender: str) -> Optional[str]:
-        """Log raw email bytes to file for debugging."""
-        try:
-            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-            sender_safe = self._sanitize_filename(sender[:50])
-            filename = f"{timestamp}_{email_id}_{sender_safe}_raw.eml"
-            file_path = self.log_dir / filename
-
-            with open(file_path, 'wb') as f:
-                f.write(raw_email)
-
-            logger.debug(f"Raw email logged to: {file_path}")
-            return str(file_path)
-
-        except Exception as e:
-            logger.error(f"Error logging raw email: {e}")
-            return None
-
     def get_log_files(self, limit: int = 100) -> list:
         """Get list of recent log files."""
         try:
@@ -186,6 +126,9 @@ class EmailLogger:
             deleted_count = 0
 
             for file_path in self.log_dir.rglob("*.txt"):
+                # Skip attachment text files — those are managed by AttachmentHandler
+                if "attachments" in file_path.parts:
+                    continue
                 if file_path.is_file() and file_path.stat().st_mtime < cutoff_time:
                     file_path.unlink()
                     deleted_count += 1

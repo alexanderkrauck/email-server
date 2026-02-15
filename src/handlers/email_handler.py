@@ -115,8 +115,8 @@ class SMTPConfigResponse(BaseModel):
 
 class AttachmentInfo(BaseModel):
     filename: str
-    content_type: str = None
-    size: int
+    content_type: Optional[str] = None
+    size: int = 0
     content: Optional[str] = None  # Base64 encoded content for small files
 
 
@@ -166,12 +166,6 @@ class EmailForwardRequest(BaseModel):
     cc_addresses: Optional[List[EmailStr]] = None
     bcc_addresses: Optional[List[EmailStr]] = None
     include_attachments: bool = True
-
-
-class AttachmentInfo(BaseModel):
-    filename: str
-    content_type: Optional[str] = None
-    size: int = 0
 
 
 class SearchResult(BaseModel):

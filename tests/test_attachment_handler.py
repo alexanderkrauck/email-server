@@ -76,16 +76,13 @@ def test_is_attachment_not_attachment():
     assert handler._is_attachment(mock_part) is False
 
 
-def test_format_file_size():
-    """Test file size formatting."""
+def test_sanitize_account_name():
+    """Test account name sanitization preserves @."""
     from src.email.attachment_handler import AttachmentHandler
 
-    handler = AttachmentHandler()
-    
-    assert handler._format_file_size(500) == "500 B"
-    assert handler._format_file_size(1024) == "1.0 KB"
-    assert handler._format_file_size(1048576) == "1.0 MB"
-    assert handler._format_file_size(1073741824) == "1.0 GB"
+    assert AttachmentHandler._sanitize_account_name("user@example.com") == "user@example.com"
+    assert AttachmentHandler._sanitize_account_name("user<bad>@test.com") == "user_bad_@test.com"
+    assert AttachmentHandler._sanitize_account_name("") == "unknown"
 
 
 @pytest.mark.asyncio

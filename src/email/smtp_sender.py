@@ -1,16 +1,17 @@
 """SMTP email sending functionality."""
 
+import logging
 import smtplib
 import ssl
-import logging
-from typing import List, Dict, Optional, Union
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from email.mime.base import MIMEBase
-from email import encoders
-from pathlib import Path
-from src.models.smtp_config import SMTPConfig
 from datetime import datetime
+from email import encoders
+from email.mime.base import MIMEBase
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from typing import Dict, List, Optional, Union
+
+from src.database.connection import get_db_session
+from src.models.smtp_config import SMTPConfig
 
 logger = logging.getLogger(__name__)
 
@@ -255,8 +256,6 @@ class EmailSenderManager:
 
     async def send_email_via_config(self, smtp_config_id: int, **email_args) -> Dict[str, Union[bool, str]]:
         """Send email using specific SMTP configuration."""
-        from src.database.connection import get_db_session
-
         try:
             with get_db_session() as db:
                 config = db.query(SMTPConfig).filter(SMTPConfig.id == smtp_config_id).first()
@@ -266,31 +265,9 @@ class EmailSenderManager:
                 if not config.enabled:
                     return {"success": False, "message": f"SMTP config {config.name} is disabled"}
 
-                # Create a detached config object with all needed attributes
-                config_data = {
-                    'id': config.id,
-                    'name': config.name,
-                    'account_name': config.account_name,
-                    'host': config.host,
-                    'port': config.port,
-                    'smtp_host': getattr(config, 'smtp_host', None),
-                    'smtp_port': getattr(config, 'smtp_port', 587),
-                    'username': config.username,
-                    'password': config.password,
-                    'imap_use_ssl': getattr(config, 'imap_use_ssl', True),
-                    'imap_use_tls': getattr(config, 'imap_use_tls', False),
-                    'smtp_use_ssl': getattr(config, 'smtp_use_ssl', False),
-                    'smtp_use_tls': getattr(config, 'smtp_use_tls', True),
-                    'enabled': config.enabled
-                }
+                # Create a detached config object outside the session
+                temp_config = SMTPConfig.create_detached(config)
 
-            # Create a temporary config object outside the session
-            class TempConfig:
-                def __init__(self, data):
-                    for key, value in data.items():
-                        setattr(self, key, value)
-
-            temp_config = TempConfig(config_data)
             sender = await self.get_sender(temp_config)
             return await sender.send_email(**email_args)
 

@@ -2,7 +2,6 @@
 
 from sqlalchemy import Column, Integer, String, Boolean, Text, DateTime
 from sqlalchemy.sql import func
-from datetime import datetime
 from .base import Base
 
 
@@ -60,3 +59,26 @@ class SMTPConfig(Base):
             'last_check': self.last_check.isoformat() if self.last_check else "",
             'total_emails_processed': self.total_emails_processed
         }
+
+    @staticmethod
+    def create_detached(config: "SMTPConfig") -> "SMTPConfig":
+        """Create a detached copy of the config for use outside SQLAlchemy session."""
+        class DetachedConfig:
+            pass
+
+        detached = DetachedConfig()
+        detached.id = config.id
+        detached.name = config.name
+        detached.account_name = config.account_name
+        detached.host = config.host
+        detached.port = config.port
+        detached.smtp_host = config.smtp_host
+        detached.smtp_port = config.smtp_port
+        detached.username = config.username
+        detached.password = config.password
+        detached.imap_use_ssl = config.imap_use_ssl
+        detached.imap_use_tls = config.imap_use_tls
+        detached.smtp_use_ssl = config.smtp_use_ssl
+        detached.smtp_use_tls = config.smtp_use_tls
+        detached.enabled = config.enabled
+        return detached

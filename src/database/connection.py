@@ -49,7 +49,6 @@ def init_database():
     from sqlalchemy import text
 
     # Import all models to ensure they're registered
-    from src.models import smtp_config, email, attachment
 
     # Create all tables
     Base.metadata.create_all(bind=engine)

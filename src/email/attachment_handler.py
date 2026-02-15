@@ -1,12 +1,18 @@
 """Email attachment handling."""
 
-import os
+# type: ignore[assignment]
+# type: ignore[return-value]
+# The above ignores are needed for SQLAlchemy Column proxy types
+
 import logging
+import os
+from datetime import datetime
+from email import message_from_bytes
 from pathlib import Path
-from typing import List, Dict, Optional
-from email.message import EmailMessage
-from src.models.attachment import EmailAttachment
+from typing import List, Optional
+
 from src.config import settings
+from src.models.attachment import EmailAttachment
 
 logger = logging.getLogger(__name__)
 
@@ -20,13 +26,12 @@ class AttachmentHandler:
 
     def _ensure_attachment_directory(self, attachment_dir: Path):
         """Ensure the attachment directory exists."""
-        attachment_dir.mkdir(parents=True, exist_ok=True)
+        attachment_dir.mkdir(parents=True, exist_ok=True)  # type: ignore[union-attr]
         logger.debug(f"Attachment directory: {attachment_dir}")
 
-    async def extract_attachments(self, raw_email: bytes, email_log_id: int, account_name: str = None) -> List[EmailAttachment]:
+    async def extract_attachments(self, raw_email: bytes, email_log_id: int, account_name: Optional[str] = None) -> List[EmailAttachment]:
         """Extract attachments from raw email and return attachment objects."""
         try:
-            from email import message_from_bytes
             msg = message_from_bytes(raw_email)
             attachments = []
 
@@ -36,7 +41,7 @@ class AttachmentHandler:
                     continue
 
                 content_disposition = part.get('Content-Disposition', '')
-                content_type = part.get_content_type()
+                part.get_content_type()
 
                 # Check if it's an attachment
                 if 'attachment' in content_disposition or self._is_attachment(part):
@@ -67,7 +72,7 @@ class AttachmentHandler:
 
         return False
 
-    async def _process_attachment(self, part, email_log_id: int, account_name: str = None) -> Optional[EmailAttachment]:
+    async def _process_attachment(self, part, email_log_id: int, account_name: Optional[str] = None) -> Optional[EmailAttachment]:
         """Process a single attachment part."""
         try:
             # Get attachment metadata
@@ -94,13 +99,13 @@ class AttachmentHandler:
 
             # Decide storage method based on size
             if size <= 1024 * 1024:  # 1MB - store in database
-                attachment.content_data = payload
+                attachment.content_data = payload  # type: ignore[assignment]
                 logger.debug(f"Storing small attachment {filename} in database")
             else:
                 # Store large attachments as files and create markdown
                 file_paths = await self._save_attachment_with_markdown(payload, filename, content_type, size, email_log_id, account_name)
                 if file_paths:
-                    attachment.file_path = str(file_paths['binary'])
+                    attachment.file_path = str(file_paths['binary'])  # type: ignore[assignment]
                     logger.debug(f"Stored large attachment {filename} at {file_paths['binary']} with metadata at {file_paths['markdown']}")
                 else:
                     logger.error(f"Failed to save attachment file {filename}")
@@ -112,7 +117,7 @@ class AttachmentHandler:
             logger.error(f"Error processing attachment: {e}")
             return None
 
-    async def _save_attachment_file(self, data: bytes, filename: str, email_log_id: int, account_name: str = None) -> Optional[Path]:
+    async def _save_attachment_file(self, data: bytes, filename: str, email_log_id: int, account_name: Optional[str] = None) -> Optional[Path]:
         """Save attachment data to file under emails directory structure."""
         try:
             # Create attachment directory under emails structure
@@ -135,7 +140,7 @@ class AttachmentHandler:
             while file_path.exists():
                 name = original_path.stem
                 ext = original_path.suffix
-                file_path = email_dir / f"{name}_{counter}{ext}"
+                file_path = attachment_dir / f"{name}_{counter}{ext}"
                 counter += 1
 
             # Write file
@@ -167,8 +172,6 @@ class AttachmentHandler:
 
             # Handle duplicate filenames
             counter = 1
-            original_binary = binary_path
-            original_markdown = markdown_path
 
             while binary_path.exists() or markdown_path.exists():
                 name, ext = os.path.splitext(safe_filename)
@@ -197,8 +200,6 @@ class AttachmentHandler:
 
     async def _create_attachment_markdown(self, filename: str, content_type: str, size: int, binary_path: Path, data: bytes) -> str:
         """Create markdown metadata for attachment."""
-        from datetime import datetime
-
         md_content = []
         md_content.append(f"# Attachment: {filename}")
         md_content.append("")
@@ -265,32 +266,21 @@ class AttachmentHandler:
 
     def _sanitize_filename(self, filename: str) -> str:
         """Sanitize filename for safe storage."""
-        # Remove or replace dangerous characters
-        invalid_chars = '<>:"/\\|?*'
-        for char in invalid_chars:
-            filename = filename.replace(char, '_')
-
-        # Limit length
-        if len(filename) > 100:
-            name, ext = os.path.splitext(filename)
-            filename = name[:95] + ext
-
-        # Ensure not empty
-        if not filename or filename.isspace():
-            filename = "unnamed_attachment"
-
-        return filename.strip()
+        from src.email import sanitize_filename
+        return sanitize_filename(filename)
 
     async def get_attachment_data(self, attachment: EmailAttachment) -> Optional[bytes]:
         """Get attachment data from database or filesystem."""
         try:
             # First try database storage
-            if attachment.content_data:
-                return attachment.content_data
+            content = attachment.content_data  # type: ignore[return-value]
+            if content:
+                return content
 
             # Try filesystem storage
-            if attachment.file_path and Path(attachment.file_path).exists():
-                with open(attachment.file_path, 'rb') as f:
+            file_path = attachment.file_path  # type: ignore[assignment]
+            if file_path and Path(file_path).exists():
+                with open(file_path, 'rb') as f:
                     return f.read()
 
             logger.warning(f"Attachment {attachment.id} not found in database or filesystem")
@@ -304,7 +294,7 @@ class AttachmentHandler:
     async def delete_attachment_files(self, email_log_id: int):
         """Delete all attachment files for an email."""
         try:
-            email_dir = self.attachment_dir / str(email_log_id)
+            email_dir = self.email_log_dir / str(email_log_id)
             if email_dir.exists():
                 for file_path in email_dir.iterdir():
                     file_path.unlink()

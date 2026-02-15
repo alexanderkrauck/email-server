@@ -1,14 +1,16 @@
 """SMTP/IMAP client for connecting to email servers."""
 
-import aioimaplib
-import asyncio
 import logging
+import re
 import ssl
-from typing import List, Dict, Optional, Tuple
-from email import message_from_bytes
-from email.message import EmailMessage
-from src.models.smtp_config import SMTPConfig
+from typing import List, Dict, Optional
+
+import aioimaplib
 from datetime import datetime
+from email import message_from_bytes
+from email.utils import parsedate_to_datetime
+
+from src.models.smtp_config import SMTPConfig
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +104,6 @@ class SMTPClient:
                 # or: (\HasNoChildren) "." "INBOX.Sent"
                 decoded = line.decode('utf-8', errors='ignore')
                 # Extract folder name - it's usually the last quoted string
-                import re
                 matches = re.findall(r'"([^"]+)"', decoded)
                 if matches and len(matches) >= 2:
                     # The last match is usually the folder name
@@ -192,9 +193,8 @@ class SMTPClient:
             email_date = None
             if date_str:
                 try:
-                    from email.utils import parsedate_to_datetime
                     email_date = parsedate_to_datetime(date_str)
-                except:
+                except Exception:
                     email_date = datetime.utcnow()
 
             # Extract body content
@@ -249,5 +249,5 @@ class SMTPClient:
             try:
                 # This is a sync method, so we can't await
                 self.client.close()
-            except:
+            except Exception:
                 pass

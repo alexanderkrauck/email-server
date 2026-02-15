@@ -1,12 +1,11 @@
 """Email content logging to files."""
 
 import json
-import os
-import asyncio
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
-import logging
+
 from src.config import settings
 from src.email.markdown_converter import EmailToMarkdownConverter
 
@@ -139,36 +138,8 @@ class EmailLogger:
 
     def _sanitize_filename(self, filename: str) -> str:
         """Sanitize filename by removing invalid characters, spaces, and encoding issues."""
-        import re
-
-        # Handle None or empty strings
-        if not filename:
-            return "unknown"
-
-        # Remove/decode common email encoding artifacts
-        filename = filename.replace('=_utf-8_B_', '').replace('=_utf-8_Q_', '')
-        filename = filename.replace('_utf-8_', '').replace('=C3=A4', 'ae').replace('=C3=BC', 'ue')
-        filename = filename.replace('=C3=B6', 'oe').replace('=C3=9F', 'ss')
-
-        # Replace spaces with underscores
-        filename = filename.replace(' ', '_')
-
-        # Remove invalid filesystem characters
-        invalid_chars = '<>:"/\\|?*[](){}!@#$%^&+=`~;,\'\"'
-        for char in invalid_chars:
-            filename = filename.replace(char, '')
-
-        # Replace multiple underscores with single underscore
-        filename = re.sub(r'_{2,}', '_', filename)
-
-        # Remove leading/trailing underscores and dots
-        filename = filename.strip('_.')
-
-        # Ensure it's not empty after cleaning
-        if not filename:
-            return "cleaned_subject"
-
-        return filename[:100]  # Limit length to prevent filesystem issues
+        from src.email import sanitize_filename
+        return sanitize_filename(filename)
 
     async def log_raw_email(self, raw_email: bytes, email_id: int, sender: str) -> Optional[str]:
         """Log raw email bytes to file for debugging."""

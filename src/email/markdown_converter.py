@@ -3,9 +3,8 @@
 import re
 import html
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict
 from bs4 import BeautifulSoup
-import base64
 
 
 class EmailToMarkdownConverter:
@@ -104,7 +103,7 @@ class EmailToMarkdownConverter:
 
             return text
 
-        except Exception as e:
+        except Exception:
             # Fallback: strip HTML tags
             return self._strip_html_tags(html_content)
 

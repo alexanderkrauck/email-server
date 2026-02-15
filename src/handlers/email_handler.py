@@ -1,23 +1,26 @@
 """FastAPI handlers for email server management."""
 
-from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Response
-from fastapi.responses import StreamingResponse
+import base64
+import json
+import logging
+
+from fastapi import APIRouter, Depends, HTTPException, File, UploadFile
+from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 from typing import List, Optional
-from pydantic import BaseModel, EmailStr
+
 from src.database.connection import get_db
-from src.models.smtp_config import SMTPConfig
-from src.models.email import EmailLog
 from src.models.attachment import EmailAttachment
-from src.email.email_processor import EmailProcessor
-from src.email.email_logger import EmailLogger
+from src.models.email import EmailLog
+from src.models.smtp_config import SMTPConfig
 from src.email.attachment_handler import AttachmentHandler
+from src.email.email_logger import EmailLogger
+from src.email.email_processor import EmailProcessor
+from src.email.markdown_converter import EmailToMarkdownConverter
 from src.email.smtp_sender import EmailSenderManager
 
 # Create global instance
 email_sender_manager = EmailSenderManager()
-import logging
-import io
 
 logger = logging.getLogger(__name__)
 
@@ -260,7 +263,6 @@ async def get_email(email_id: int, include_content: bool = True, db: Session = D
             # For small attachments, include base64 content
             if attachment.size <= 1024 * 100:  # 100KB limit for inline content
                 try:
-                    import base64
                     data = await attachment_handler.get_attachment_data(attachment)
                     if data:
                         attachment_info.content = base64.b64encode(data).decode('utf-8')
@@ -289,7 +291,6 @@ async def get_email(email_id: int, include_content: bool = True, db: Session = D
         response.body_html = email.body_html
 
         # Generate markdown content on-the-fly
-        from src.email.markdown_converter import EmailToMarkdownConverter
         converter = EmailToMarkdownConverter()
         email_data = {
             'sender': email.sender,
@@ -316,7 +317,7 @@ async def get_email(email_id: int, include_content: bool = True, db: Session = D
 async def get_status(db: Session = Depends(get_db)):
     """Get system status."""
     total_configs = db.query(SMTPConfig).count()
-    enabled_configs = db.query(SMTPConfig).filter(SMTPConfig.enabled == True).count()
+    enabled_configs = db.query(SMTPConfig).filter(SMTPConfig.enabled).count()
     total_emails = db.query(EmailLog).count()
 
     # Get email logger instance
@@ -394,8 +395,6 @@ async def send_email_with_attachments(
 ):
     """Send an email with file attachments."""
     try:
-        import json
-
         # Parse JSON string parameters
         to_list = json.loads(to_addresses)
         cc_list = json.loads(cc_addresses) if cc_addresses else None
@@ -523,7 +522,7 @@ async def forward_email(email_id: int, forward_request: EmailForwardRequest, db:
         # Format original message
         original_date = original_email.email_date.strftime("%Y-%m-%d %H:%M:%S") if original_email.email_date else "Unknown"
 
-        original_header = f"\n\n---------- Forwarded message ----------\n"
+        original_header = "\n\n---------- Forwarded message ----------\n"
         original_header += f"From: {original_email.sender}\n"
         original_header += f"Date: {original_date}\n"
         original_header += f"Subject: {original_email.subject or '(no subject)'}\n"
@@ -532,7 +531,7 @@ async def forward_email(email_id: int, forward_request: EmailForwardRequest, db:
         forward_body_text += original_header + (original_email.body_plain or "")
 
         if forward_body_html:
-            html_header = f"<br><br>---------- Forwarded message ----------<br>"
+            html_header = "<br><br>---------- Forwarded message ----------<br>"
             html_header += f"<b>From:</b> {original_email.sender}<br>"
             html_header += f"<b>Date:</b> {original_date}<br>"
             html_header += f"<b>Subject:</b> {original_email.subject or '(no subject)'}<br>"

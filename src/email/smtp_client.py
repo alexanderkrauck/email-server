@@ -138,7 +138,7 @@ class SMTPClient:
                 logger.info(f"Using Gmail All Mail folder: {folders}")
             else:
                 folders = ["INBOX"]
-                logger.warning(f"Gmail All Mail folder not found, falling back to INBOX")
+                logger.warning("Gmail All Mail folder not found, falling back to INBOX")
 
         logger.info(f"Found {len(folders)} folders for {self.config.name}: {folders}")
         return folders

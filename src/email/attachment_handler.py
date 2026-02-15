@@ -7,7 +7,10 @@
 import logging
 from email import message_from_bytes
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.storage_config.resolver import StorageConfig
 
 from src.config import settings
 from src.models.attachment import EmailAttachment

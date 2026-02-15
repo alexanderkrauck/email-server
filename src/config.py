@@ -1,7 +1,6 @@
 """Configuration settings for Email Server."""
 
 from pydantic_settings import BaseSettings
-from typing import List
 
 
 class Settings(BaseSettings):

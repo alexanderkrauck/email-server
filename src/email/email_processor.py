@@ -105,12 +105,10 @@ class EmailProcessor:
         """Process a batch of emails."""
         from src.email.email_logger import EmailLogger
         from src.email.attachment_handler import AttachmentHandler
-        from src.email.text_extractor import TextExtractor
         from src.storage_config.resolver import resolve_storage_config
 
         logger_instance = EmailLogger()
         attachment_handler = AttachmentHandler()
-        text_extractor = TextExtractor()
 
         for email_data in emails:
             try:

@@ -1,8 +1,10 @@
 """Text extraction from various content types."""
 
 import logging
-from typing import Optional
-from pathlib import Path
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.storage_config.resolver import StorageConfig
 
 logger = logging.getLogger(__name__)
 

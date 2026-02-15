@@ -17,10 +17,8 @@ from src.models.smtp_config import SMTPConfig
 from src.email.attachment_handler import AttachmentHandler
 from src.email.email_logger import EmailLogger
 from src.email.email_processor import EmailProcessor
-from src.email.markdown_converter import EmailToMarkdownConverter
 from src.email.smtp_sender import EmailSenderManager
 from src.email.search_service import SearchService
-from src.config import settings
 
 # Create global instance
 email_sender_manager = EmailSenderManager()
@@ -917,7 +915,6 @@ async def reply_to_email(email_id: int, reply_request: EmailReplyRequest, db: Se
             original_intro = f"\n\nOn {original_date}, {original_email.sender} wrote:\n"
             
             original_plain = ""
-            original_html = ""
             
             if original_email.log_file_path:
                 try:

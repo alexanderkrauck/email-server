@@ -1,7 +1,12 @@
 # Use Python 3.11 Alpine for minimal size (like chronotask)
 FROM python:3.11-alpine
 
-# Install build dependencies for some Python packages
+# Install system dependencies
+# - ripgrep: for regex search
+# - tesseract-ocr: for image text extraction (OCR)
+# - leptonica: image processing library for OCR
+# - gcc, musl-dev, libffi-dev, etc.: build dependencies for Python packages
+# - pillow dependencies: for image handling
 RUN apk add --no-cache \
     gcc \
     musl-dev \
@@ -9,6 +14,11 @@ RUN apk add --no-cache \
     openssl-dev \
     python3-dev \
     curl \
+    ripgrep \
+    tesseract-ocr \
+    leptonica \
+    tesseract-ocr-eng \
+    pillow \
     && rm -rf /var/cache/apk/*
 
 # Set working directory

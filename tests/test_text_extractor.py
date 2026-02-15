@@ -1,7 +1,6 @@
 """Tests for text extractor."""
 
 import pytest
-from unittest.mock import patch, MagicMock
 
 
 def test_text_extractor_initialization():
@@ -30,7 +29,7 @@ async def test_extract_plain_text():
 
     data = b"Hello, World!"
     result = await extractor.extract(data, "text/plain", config)
-    
+
     assert result == "Hello, World!"
 
 
@@ -52,7 +51,7 @@ async def test_extract_html():
 
     data = b"<html><body><p>Hello World</p></body></html>"
     result = await extractor.extract(data, "text/html", config)
-    
+
     assert "Hello World" in result
 
 
@@ -74,7 +73,7 @@ async def test_extract_unsupported_type():
 
     data = b"some binary data"
     result = await extractor.extract(data, "application/octet-stream", config)
-    
+
     assert result is None
 
 
@@ -96,7 +95,7 @@ async def test_extract_with_disabled_config():
 
     data = b"<html><body><p>Hello</p></body></html>"
     result = await extractor.extract(data, "text/html", config)
-    
+
     assert result is None
 
 
@@ -105,10 +104,10 @@ def test_extract_html_method():
     from src.email.text_extractor import TextExtractor
 
     extractor = TextExtractor()
-    
+
     data = b"<html><head><title>Test</title></head><body><p>Content</p></body></html>"
     result = extractor._extract_html(data)
-    
+
     assert "Test" in result
     assert "Content" in result
 
@@ -118,10 +117,10 @@ def test_decode_utf8():
     from src.email.text_extractor import TextExtractor
 
     extractor = TextExtractor()
-    
+
     data = "Hello Wörld!".encode("utf-8")
     result = extractor._decode_utf8(data)
-    
+
     assert result == "Hello Wörld!"
 
 
@@ -130,9 +129,9 @@ def test_decode_utf8_with_invalid_chars():
     from src.email.text_extractor import TextExtractor
 
     extractor = TextExtractor()
-    
+
     data = b"Hello \xff\xfe World"
     result = extractor._decode_utf8(data)
-    
+
     assert "Hello" in result
     assert "World" in result

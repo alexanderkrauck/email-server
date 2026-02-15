@@ -2,12 +2,14 @@
 
 import asyncio
 import logging
-from typing import List
-from src.database.connection import get_db_session
-from src.models.smtp_config import SMTPConfig
-from src.models.email import EmailLog
-from src.email.smtp_client import SMTPClient
 from datetime import datetime
+from typing import List
+
+from src.database.connection import get_db_session
+from src.email.smtp_client import SMTPClient
+from src.email.text_extractor import TextExtractor
+from src.models.email import EmailLog
+from src.models.smtp_config import SMTPConfig
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +35,7 @@ class EmailProcessor:
                 await self._process_all_servers()
                 await asyncio.sleep(30)  # Check every 30 seconds
             except Exception as e:
-                logger.error(f"Error in email processing loop: {e}")
+                logger.error("Error in email processing loop: %s", e)
                 await asyncio.sleep(60)  # Wait longer on error
 
     async def stop_processing(self):
@@ -59,23 +61,22 @@ class EmailProcessor:
             # Create detached config copies to avoid session issues
             config_copies = [SMTPConfig.create_detached(config) for config in configs]
 
-        # Process each server with detached config copies
+        # Process each server with detached config copies (in parallel)
         tasks = []
         for config_copy in config_copies:
             task = asyncio.create_task(self._process_server(config_copy))
             tasks.append(task)
 
-            # Wait for all servers to complete
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
+        # Wait for all servers to complete (outside the loop for parallel processing)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _process_server(self, config: SMTPConfig):
         """Process emails from a single server."""
-        try:
-            # Store config attributes to avoid detachment issues
-            config_id = config.id
-            config_host = config.host
+        config_id = config.id
+        config_host = config.host
 
+        try:
             # Get or create client for this server
             client_key = f"{config_id}_{config_host}"
             if client_key not in self.active_clients:
@@ -83,51 +84,54 @@ class EmailProcessor:
 
             client = self.active_clients[client_key]
 
-            # Fetch new emails
-            emails = await client.fetch_new_emails()
-
-            if emails:
-                await self._process_emails(emails)
-                await self._update_server_stats(config, len(emails))
-
-            # Update last check time
-            with get_db_session() as db:
-                db_config = db.query(SMTPConfig).filter(SMTPConfig.id == config_id).first()
-                if db_config:
-                    db_config.last_check = datetime.utcnow()
+            # Fetch and process emails in batches
+            # Stats are updated incrementally after each batch so progress
+            # is persisted even if a later batch fails (e.g. IMAP timeout
+            # on large mailboxes like Gmail All Mail).
+            async for batch in client.fetch_new_emails():
+                await self._process_emails(batch)
+                if batch:
+                    await self._update_server_stats(config, len(batch))
 
         except Exception as e:
-            logger.error(f"Error processing server {getattr(config, 'name', 'unknown')}: {e}")
+            logger.error("Error processing server %s: %s", getattr(config, "name", "unknown"), e)
+        finally:
+            # Always update last_check, even if processing was interrupted
+            try:
+                with get_db_session() as db:
+                    db_config = db.query(SMTPConfig).filter(SMTPConfig.id == config_id).first()
+                    if db_config:
+                        db_config.last_check = datetime.utcnow()
+            except Exception as e:
+                logger.error("Error updating last_check for config %s: %s", config_id, e)
 
     async def _process_emails(self, emails: List[dict]):
         """Process a batch of emails."""
-        from src.email.email_logger import EmailLogger
         from src.email.attachment_handler import AttachmentHandler
-        from src.email.text_extractor import TextExtractor
         from src.storage_config.resolver import resolve_storage_config
 
-        logger_instance = EmailLogger()
-        attachment_handler = AttachmentHandler()
         text_extractor = TextExtractor()
+        attachment_handler = AttachmentHandler()
 
         for email_data in emails:
             try:
                 with get_db_session() as db:
                     smtp_config = db.query(SMTPConfig).filter(SMTPConfig.id == email_data["smtp_config_id"]).first()
                     storage_config = resolve_storage_config(smtp_config)
-                    account_email = None
-                    if smtp_config:
-                        account_email = smtp_config.account_name if smtp_config.account_name else smtp_config.username
-                    
+
                     # Check if email already exists (upsert pattern)
-                    existing_email = db.query(EmailLog).filter(
-                        EmailLog.message_id == email_data["message_id"]
-                    ).first()
-                    
+                    existing_email = db.query(EmailLog).filter(EmailLog.message_id == email_data["message_id"]).first()
+
                     if existing_email:
-                        logger.debug(f"Email already exists: {email_data['message_id']}")
+                        logger.debug("Email already exists: %s", email_data["message_id"])
                         continue
-                    
+
+                    # Get body content, converting HTML to plain text if needed
+                    body_plain = email_data.get("body_plain", "")
+                    body_html = email_data.get("body_html", "")
+                    if not body_plain and body_html:
+                        body_plain = text_extractor._extract_html(body_html.encode("utf-8", errors="replace")) or ""
+
                     email_log = EmailLog(
                         smtp_config_id=email_data["smtp_config_id"],
                         sender=email_data["sender"],
@@ -135,29 +139,32 @@ class EmailProcessor:
                         subject=email_data["subject"],
                         message_id=email_data["message_id"],
                         email_date=email_data["email_date"],
-                        attachment_count=email_data["attachment_count"]
+                        attachment_count=email_data["attachment_count"],
+                        body_plain=body_plain,
+                        body_html=body_html,
                     )
 
                     db.add(email_log)
                     db.flush()
 
-                    file_path = await logger_instance.log_email_to_file(email_data, email_log.id, account_email)
-                    if file_path:
-                        email_log.log_file_path = file_path
-
                     if email_data["attachment_count"] > 0 and "raw_email" in email_data:
                         attachments = await attachment_handler.extract_attachments(
-                            email_data["raw_email"], email_log.id, account_email, storage_config
+                            email_data["raw_email"], email_log.id, storage_config
                         )
                         for attachment in attachments:
                             db.add(attachment)
 
                         email_log.attachment_count = len(attachments)
 
-                logger.info(f"Processed email: {email_data['sender']} -> {email_data['subject'][:50]}... ({email_data['attachment_count']} attachments)")
+                logger.info(
+                    "Processed email: %s -> %s... (%s attachments)",
+                    email_data["sender"],
+                    email_data["subject"][:50],
+                    email_data["attachment_count"],
+                )
 
             except Exception as e:
-                logger.error(f"Error processing email {email_data.get('message_id', 'unknown')}: {e}")
+                logger.error("Error processing email %s: %s", email_data.get("message_id", "unknown"), e)
 
     async def _update_server_stats(self, config: SMTPConfig, email_count: int):
         """Update server statistics."""
@@ -168,7 +175,7 @@ class EmailProcessor:
                 if db_config:
                     db_config.total_emails_processed += email_count
         except Exception as e:
-            logger.error(f"Error updating server stats: {e}")
+            logger.error("Error updating server stats: %s", e)
 
     async def process_server_now(self, server_id: int) -> dict:
         """Manually trigger processing for a specific server."""
@@ -181,10 +188,14 @@ class EmailProcessor:
                 if not config.enabled:
                     return {"error": "Server is disabled"}
 
-                # Create a new config object within the same session to avoid detachment
-                await self._process_server(config)
-                return {"success": True, "message": f"Processed emails from {config.name}"}
+                # Create a detached copy before closing the session, matching
+                # the pattern used in _process_all_servers. This avoids nested
+                # session conflicts when _process_server opens its own sessions.
+                config_copy = SMTPConfig.create_detached(config)
+
+            await self._process_server(config_copy)
+            return {"success": True, "message": f"Processed emails from {config_copy.name}"}
 
         except Exception as e:
-            logger.error(f"Manual processing failed for server {server_id}: {e}")
+            logger.error("Manual processing failed for server %s: %s", server_id, e)
             return {"error": str(e)}

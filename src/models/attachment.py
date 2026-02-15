@@ -1,13 +1,14 @@
 """Email attachment model."""
 
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey
-from sqlalchemy.sql import func
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
+
 from .base import Base
 
 
 class EmailAttachment(Base):
-    """Email attachment model for storing attachment metadata and text content."""
+    """Email attachment model for storing attachment metadata and extracted text."""
 
     __tablename__ = "email_attachments"
 
@@ -19,7 +20,7 @@ class EmailAttachment(Base):
     content_id = Column(String(255), nullable=True)
     size = Column(Integer, default=0)
 
-    text_file_path = Column(String(1000), nullable=True)
+    text_content = Column(Text, nullable=True)  # Extracted text stored directly in DB
 
     created_at = Column(DateTime, default=func.now())
 

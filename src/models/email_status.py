@@ -1,7 +1,8 @@
 """Minimal email status tracking model."""
 
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Boolean
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String
 from sqlalchemy.sql import func
+
 from .base import Base
 
 
@@ -20,7 +21,6 @@ class EmailStatus(Base):
 
     # Status tracking
     processed_at = Column(DateTime, default=func.now(), index=True)
-    file_path = Column(String(1000), nullable=True)  # Path to markdown file
     has_attachments = Column(Boolean, default=False)
     attachment_count = Column(Integer, default=0)
 

@@ -1,13 +1,17 @@
 """Email model for logging processed emails."""
 
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey
-from sqlalchemy.sql import func
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
+
 from .base import Base
 
 
 class EmailLog(Base):
-    """Email log model for tracking processed emails."""
+    """Email log model for tracking processed emails.
+
+    Email body content is stored directly in the database (body_plain, body_html).
+    """
 
     __tablename__ = "email_logs"
 
@@ -19,7 +23,8 @@ class EmailLog(Base):
     subject = Column(Text, nullable=True)
     message_id = Column(String(255), unique=True, nullable=False)
 
-    log_file_path = Column(String(1000), nullable=True)
+    body_plain = Column(Text, nullable=True)
+    body_html = Column(Text, nullable=True)
 
     email_date = Column(DateTime, nullable=True)
     processed_at = Column(DateTime, default=func.now())

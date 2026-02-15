@@ -1,23 +1,16 @@
 """Tests for attachment handler."""
 
-import pytest
-import os
-import tempfile
-from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock
 
-os.environ["EMAIL_LOG_DIR"] = "/tmp/test_attachments"
+import pytest
 
 
 def test_attachment_handler_initialization():
-    """Test AttachmentHandler initialization."""
+    """Test AttachmentHandler can be instantiated."""
     from src.email.attachment_handler import AttachmentHandler
 
-    with patch("src.email.attachment_handler.settings") as mock_settings:
-        mock_settings.email_log_dir = "/tmp/test"
-        
-        handler = AttachmentHandler()
-        assert handler.email_log_dir == Path("/tmp/test")
+    handler = AttachmentHandler()
+    assert handler is not None
 
 
 def test_is_attachment_with_filename():
@@ -25,12 +18,12 @@ def test_is_attachment_with_filename():
     from src.email.attachment_handler import AttachmentHandler
 
     handler = AttachmentHandler()
-    
+
     mock_part = MagicMock()
     mock_part.get_filename.return_value = "document.pdf"
     mock_part.get.return_value = ""
     mock_part.get_content_type.return_value = "application/pdf"
-    
+
     assert handler._is_attachment(mock_part) is True
 
 
@@ -39,12 +32,12 @@ def test_is_attachment_with_content_disposition():
     from src.email.attachment_handler import AttachmentHandler
 
     handler = AttachmentHandler()
-    
+
     mock_part = MagicMock()
     mock_part.get_filename.return_value = None
     mock_part.get.return_value = "attachment; filename=test.txt"
     mock_part.get_content_type.return_value = "text/plain"
-    
+
     assert handler._is_attachment(mock_part) is True
 
 
@@ -53,12 +46,12 @@ def test_is_attachment_inline_image():
     from src.email.attachment_handler import AttachmentHandler
 
     handler = AttachmentHandler()
-    
+
     mock_part = MagicMock()
     mock_part.get_filename.return_value = None
     mock_part.get.return_value = ""
     mock_part.get_content_type.return_value = "image/png"
-    
+
     assert handler._is_attachment(mock_part) is True
 
 
@@ -67,47 +60,13 @@ def test_is_attachment_not_attachment():
     from src.email.attachment_handler import AttachmentHandler
 
     handler = AttachmentHandler()
-    
+
     mock_part = MagicMock()
     mock_part.get_filename.return_value = None
     mock_part.get.return_value = ""
     mock_part.get_content_type.return_value = "text/plain"
-    
+
     assert handler._is_attachment(mock_part) is False
-
-
-def test_format_file_size():
-    """Test file size formatting."""
-    from src.email.attachment_handler import AttachmentHandler
-
-    handler = AttachmentHandler()
-    
-    assert handler._format_file_size(500) == "500 B"
-    assert handler._format_file_size(1024) == "1.0 KB"
-    assert handler._format_file_size(1048576) == "1.0 MB"
-    assert handler._format_file_size(1073741824) == "1.0 GB"
-
-
-@pytest.mark.asyncio
-async def test_save_attachment_text(temp_dir):
-    """Test saving attachment text to file."""
-    from src.email.attachment_handler import AttachmentHandler
-
-    with patch("src.email.attachment_handler.settings") as mock_settings:
-        mock_settings.email_log_dir = temp_dir
-        
-        handler = AttachmentHandler()
-        
-        result = await handler._save_attachment_text(
-            "Attachment content",
-            "test.txt",
-            1,
-            "test@example.com"
-        )
-        
-        assert result is not None
-        assert Path(result).exists()
-        assert Path(result).read_text() == "Attachment content"
 
 
 @pytest.mark.asyncio
@@ -116,7 +75,7 @@ async def test_extract_attachments_empty_email():
     from src.email.attachment_handler import AttachmentHandler
 
     handler = AttachmentHandler()
-    
+
     raw_email = b"""From: sender@example.com
 To: recipient@example.com
 Subject: Test
@@ -125,10 +84,78 @@ Content-Type: text/plain
 
 Simple email body.
 """
-    
-    with patch("src.email.attachment_handler.settings") as mock_settings:
-        mock_settings.email_log_dir = "/tmp/test"
-        
-        attachments = await handler.extract_attachments(raw_email, 1, "test@example.com", None)
-    
+
+    attachments = await handler.extract_attachments(raw_email, 1, None)
+
     assert len(attachments) == 0
+
+
+@pytest.mark.asyncio
+async def test_process_attachment_creates_db_object():
+    """Test that _process_attachment returns an EmailAttachment with text_content."""
+    from src.email.attachment_handler import AttachmentHandler
+    from src.storage_config.resolver import StorageConfig
+
+    handler = AttachmentHandler()
+
+    mock_part = MagicMock()
+    mock_part.get_filename.return_value = "test.txt"
+    mock_part.get_content_type.return_value = "text/plain"
+    mock_part.get.return_value = ""
+    mock_part.get_payload.return_value = b"Hello, this is test content."
+
+    storage_config = StorageConfig(
+        store_text_only=False,
+        max_attachment_size=10 * 1024 * 1024,
+        extract_pdf_text=True,
+        extract_docx_text=True,
+        extract_image_text=True,
+        extract_other_text=True,
+    )
+
+    attachment = await handler._process_attachment(mock_part, 1, storage_config)
+
+    assert attachment is not None
+    assert attachment.filename == "test.txt"
+    assert attachment.content_type == "text/plain"
+    assert attachment.size == len(b"Hello, this is test content.")
+    assert attachment.email_log_id == 1
+    # text_content should be populated for text/plain
+    assert attachment.text_content is not None
+
+
+@pytest.mark.asyncio
+async def test_extract_attachments_with_attachment():
+    """Test extracting attachments from email with an attachment."""
+    from src.email.attachment_handler import AttachmentHandler
+
+    handler = AttachmentHandler()
+
+    raw_email = b"""From: sender@example.com
+To: recipient@example.com
+Subject: Test with Attachment
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary=boundary123
+
+--boundary123
+Content-Type: text/plain; charset=UTF-8
+
+This email has an attachment.
+
+--boundary123
+Content-Type: text/plain; filename="test.txt"
+Content-Disposition: attachment; filename="test.txt"
+
+This is the attachment content.
+
+--boundary123--
+"""
+
+    attachments = await handler.extract_attachments(raw_email, 1, None)
+
+    assert len(attachments) == 1
+    assert attachments[0].filename == "test.txt"
+    assert attachments[0].content_type == "text/plain"
+    # Text content stored in DB column, not on filesystem
+    assert attachments[0].text_content is not None
+    assert "attachment content" in attachments[0].text_content

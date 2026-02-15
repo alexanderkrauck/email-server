@@ -27,12 +27,12 @@ class EmailSender:
         """Connect to SMTP server."""
         try:
             # Create SMTP connection using smtp_host/smtp_port if available, otherwise fall back to host/port
-            smtp_host = getattr(self.config, 'smtp_host', None) or self.config.host
-            smtp_port = getattr(self.config, 'smtp_port', self.config.port)
+            smtp_host = getattr(self.config, "smtp_host", None) or self.config.host
+            smtp_port = getattr(self.config, "smtp_port", self.config.port)
 
             # Use specific SMTP SSL/TLS settings
-            smtp_use_ssl = getattr(self.config, 'smtp_use_ssl', False)
-            smtp_use_tls = getattr(self.config, 'smtp_use_tls', True)
+            smtp_use_ssl = getattr(self.config, "smtp_use_ssl", False)
+            smtp_use_tls = getattr(self.config, "smtp_use_tls", True)
 
             if smtp_use_ssl:
                 # Use SSL connection (typically port 465)
@@ -46,11 +46,11 @@ class EmailSender:
 
             # Login
             self._server.login(self.config.username, self.config.password)
-            logger.info(f"Connected to SMTP server {self.config.name}")
+            logger.info("Connected to SMTP server %s", self.config.name)
             return True
 
         except Exception as e:
-            logger.error(f"Failed to connect to SMTP server {self.config.name}: {e}")
+            logger.error("Failed to connect to SMTP server %s: %s", self.config.name, e)
             return False
 
     def disconnect(self):
@@ -58,23 +58,25 @@ class EmailSender:
         if self._server:
             try:
                 self._server.quit()
-                logger.info(f"Disconnected from SMTP server {self.config.name}")
+                logger.info("Disconnected from SMTP server %s", self.config.name)
             except Exception as e:
-                logger.error(f"Error disconnecting from SMTP server {self.config.name}: {e}")
+                logger.error("Error disconnecting from SMTP server %s: %s", self.config.name, e)
             finally:
                 self._server = None
 
-    async def send_email(self,
-                        to_addresses: List[str],
-                        subject: str,
-                        body_text: Optional[str] = None,
-                        body_html: Optional[str] = None,
-                        cc_addresses: Optional[List[str]] = None,
-                        bcc_addresses: Optional[List[str]] = None,
-                        attachments: Optional[List[Dict]] = None,
-                        reply_to: Optional[str] = None,
-                        in_reply_to: Optional[str] = None,
-                        references: Optional[str] = None) -> Dict[str, Union[bool, str]]:
+    async def send_email(
+        self,
+        to_addresses: List[str],
+        subject: str,
+        body_text: Optional[str] = None,
+        body_html: Optional[str] = None,
+        cc_addresses: Optional[List[str]] = None,
+        bcc_addresses: Optional[List[str]] = None,
+        attachments: Optional[List[Dict]] = None,
+        reply_to: Optional[str] = None,
+        in_reply_to: Optional[str] = None,
+        references: Optional[str] = None,
+    ) -> Dict[str, Union[bool, str]]:
         """
         Send an email with optional attachments.
 
@@ -99,42 +101,42 @@ class EmailSender:
 
         try:
             # Create message
-            msg = MIMEMultipart('mixed')
+            msg = MIMEMultipart("mixed")
 
             # Set headers - use account_name if available, otherwise username
-            from_email = getattr(self.config, 'account_name', self.config.username)
-            if not from_email or '@' not in from_email:
+            from_email = getattr(self.config, "account_name", self.config.username)
+            if not from_email or "@" not in from_email:
                 from_email = self.config.username  # fallback
-            msg['From'] = from_email
-            msg['To'] = ', '.join(to_addresses)
-            msg['Subject'] = subject
-            msg['Date'] = datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S +0000')
+            msg["From"] = from_email
+            msg["To"] = ", ".join(to_addresses)
+            msg["Subject"] = subject
+            msg["Date"] = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
 
             if cc_addresses:
-                msg['Cc'] = ', '.join(cc_addresses)
+                msg["Cc"] = ", ".join(cc_addresses)
             if reply_to:
-                msg['Reply-To'] = reply_to
+                msg["Reply-To"] = reply_to
             if in_reply_to:
-                msg['In-Reply-To'] = in_reply_to
+                msg["In-Reply-To"] = in_reply_to
             if references:
-                msg['References'] = references
+                msg["References"] = references
 
             # Create body container
-            body_container = MIMEMultipart('alternative')
+            body_container = MIMEMultipart("alternative")
 
             # Add text body
             if body_text:
-                text_part = MIMEText(body_text, 'plain', 'utf-8')
+                text_part = MIMEText(body_text, "plain", "utf-8")
                 body_container.attach(text_part)
 
             # Add HTML body
             if body_html:
-                html_part = MIMEText(body_html, 'html', 'utf-8')
+                html_part = MIMEText(body_html, "html", "utf-8")
                 body_container.attach(html_part)
 
             # If no body provided, add default
             if not body_text and not body_html:
-                text_part = MIMEText("", 'plain', 'utf-8')
+                text_part = MIMEText("", "plain", "utf-8")
                 body_container.attach(text_part)
 
             # Attach body to main message
@@ -144,21 +146,18 @@ class EmailSender:
             if attachments:
                 for attachment in attachments:
                     try:
-                        part = MIMEBase('application', 'octet-stream')
-                        part.set_payload(attachment['data'])
+                        part = MIMEBase("application", "octet-stream")
+                        part.set_payload(attachment["data"])
                         encoders.encode_base64(part)
 
-                        filename = attachment.get('filename', 'attachment')
-                        part.add_header(
-                            'Content-Disposition',
-                            f'attachment; filename= {filename}'
-                        )
+                        filename = attachment.get("filename", "attachment")
+                        part.add_header("Content-Disposition", f"attachment; filename= {filename}")
 
                         msg.attach(part)
-                        logger.debug(f"Added attachment: {filename}")
+                        logger.debug("Added attachment: %s", filename)
 
                     except Exception as e:
-                        logger.error(f"Error adding attachment {attachment.get('filename', 'unknown')}: {e}")
+                        logger.error("Error adding attachment %s: %s", attachment.get("filename", "unknown"), e)
 
             # Collect all recipients
             all_recipients = to_addresses[:]
@@ -171,13 +170,13 @@ class EmailSender:
             self._server.send_message(msg, to_addrs=all_recipients)
 
             recipient_count = len(all_recipients)
-            logger.info(f"Email sent successfully to {recipient_count} recipients via {self.config.name}")
+            logger.info("Email sent successfully to %s recipients via %s", recipient_count, self.config.name)
 
             return {
                 "success": True,
                 "message": f"Email sent to {recipient_count} recipients",
                 "recipients": recipient_count,
-                "smtp_server": self.config.name
+                "smtp_server": self.config.name,
             }
 
         except Exception as e:
@@ -185,12 +184,9 @@ class EmailSender:
             logger.error(error_msg)
             return {"success": False, "message": error_msg}
 
-    async def send_template_email(self,
-                                 template_name: str,
-                                 to_addresses: List[str],
-                                 template_data: Dict,
-                                 subject: Optional[str] = None,
-                                 **kwargs) -> Dict[str, Union[bool, str]]:
+    async def send_template_email(
+        self, template_name: str, to_addresses: List[str], template_data: Dict, subject: Optional[str] = None, **kwargs
+    ) -> Dict[str, Union[bool, str]]:
         """
         Send email using a template.
 
@@ -203,8 +199,8 @@ class EmailSender:
         """
         try:
             # Simple template substitution (in production, use proper template engine)
-            body_text = template_data.get('body_text', '')
-            body_html = template_data.get('body_html', '')
+            body_text = template_data.get("body_text", "")
+            body_html = template_data.get("body_html", "")
 
             # Replace placeholders in templates
             for key, value in template_data.items():
@@ -222,7 +218,7 @@ class EmailSender:
                 subject=subject or "Email from Email Server",
                 body_text=body_text if body_text else None,
                 body_html=body_html if body_html else None,
-                **kwargs
+                **kwargs,
             )
 
         except Exception as e:

@@ -3,12 +3,12 @@
 import logging
 import re
 import ssl
-from typing import List, Dict, Optional
-
-import aioimaplib
 from datetime import datetime
 from email import message_from_bytes
 from email.utils import parsedate_to_datetime
+from typing import Dict, List, Optional
+
+import aioimaplib
 
 from src.models.smtp_config import SMTPConfig
 
@@ -27,8 +27,8 @@ class SMTPClient:
         """Connect to the IMAP server."""
         try:
             # Use IMAP-specific SSL/TLS settings
-            imap_use_ssl = getattr(self.config, 'imap_use_ssl', True)
-            imap_use_tls = getattr(self.config, 'imap_use_tls', False)
+            imap_use_ssl = getattr(self.config, "imap_use_ssl", True)
+            imap_use_tls = getattr(self.config, "imap_use_tls", False)
 
             # Create SSL context
             ssl_context = ssl.create_default_context()
@@ -39,15 +39,10 @@ class SMTPClient:
             # Connect to IMAP server
             if imap_use_ssl:
                 self.client = aioimaplib.IMAP4_SSL(
-                    host=self.config.host,
-                    port=self.config.port,
-                    ssl_context=ssl_context
+                    host=self.config.host, port=self.config.port, ssl_context=ssl_context
                 )
             else:
-                self.client = aioimaplib.IMAP4(
-                    host=self.config.host,
-                    port=self.config.port
-                )
+                self.client = aioimaplib.IMAP4(host=self.config.host, port=self.config.port)
 
             await self.client.wait_hello_from_server()
 
@@ -56,21 +51,17 @@ class SMTPClient:
                 await self.client.starttls(ssl_context=ssl_context)
 
             # Login
-            login_response = await self.client.login(
-                self.config.username,
-                self.config.password
-            )
+            login_response = await self.client.login(self.config.username, self.config.password)
 
             if login_response.result == "OK":
                 self._connected = True
-                logger.info(f"Successfully connected to {self.config.name} ({self.config.host})")
+                logger.info("Successfully connected to %s (%s)", self.config.name, self.config.host)
                 return True
-            else:
-                logger.error(f"Login failed for {self.config.name}: {login_response.result} - {login_response.data}")
-                return False
+            logger.error("Login failed for %s: %s - %s", self.config.name, login_response.result, login_response.data)
+            return False
 
         except Exception as e:
-            logger.error(f"Connection failed for {self.config.name}: {type(e).__name__}: {e}")
+            logger.error("Connection failed for %s: %s: %s", self.config.name, type(e).__name__, e)
             return False
 
     async def disconnect(self):
@@ -79,9 +70,9 @@ class SMTPClient:
             try:
                 await self.client.logout()
                 self._connected = False
-                logger.info(f"Disconnected from {self.config.name}")
+                logger.info("Disconnected from %s", self.config.name)
             except Exception as e:
-                logger.error(f"Error disconnecting from {self.config.name}: {e}")
+                logger.error("Error disconnecting from %s: %s", self.config.name, e)
 
     BATCH_SIZE = 10
 
@@ -105,26 +96,26 @@ class SMTPClient:
                     async for batch in self._fetch_folder(folder, limit):
                         yield batch
                 except Exception as e:
-                    logger.error(f"Error processing folder {folder} for {self.config.name}: {e}")
+                    logger.error("Error processing folder %s for %s: %s", folder, self.config.name, e)
                     continue
 
         except Exception as e:
-            logger.error(f"Error fetching emails from {self.config.name}: {e}")
+            logger.error("Error fetching emails from %s: %s", self.config.name, e)
 
     async def _get_folders(self) -> List[str]:
         """Get list of folders to sync."""
-        list_response = await self.client.list('""', '*')
+        list_response = await self.client.list('""', "*")
         if list_response.result != "OK":
-            logger.warning(f"Failed to list folders for {self.config.name}")
+            logger.warning("Failed to list folders for %s", self.config.name)
             return []
 
         folders = []
         for line in list_response.lines:
-            decoded = line.decode('utf-8', errors='ignore')
+            decoded = line.decode("utf-8", errors="ignore")
             matches = re.findall(r'"([^"]+)"', decoded)
             if matches and len(matches) >= 2:
                 folder_name = matches[-1]
-                if folder_name not in ['.', '/', '\\']:
+                if folder_name not in [".", "/", "\\"]:
                     folders.append(folder_name)
 
         if not folders:
@@ -135,12 +126,12 @@ class SMTPClient:
             all_mail_folders = [f for f in folders if "All Mail" in f or "Alle Nachrichten" in f]
             if all_mail_folders:
                 folders = all_mail_folders
-                logger.info(f"Using Gmail All Mail folder: {folders}")
+                logger.info("Using Gmail All Mail folder: %s", folders)
             else:
                 folders = ["INBOX"]
                 logger.warning("Gmail All Mail folder not found, falling back to INBOX")
 
-        logger.info(f"Found {len(folders)} folders for {self.config.name}: {folders}")
+        logger.info("Found %s folders for %s: %s", len(folders), self.config.name, folders)
         return folders
 
     async def _fetch_folder(self, folder: str, limit: int = None):
@@ -151,21 +142,21 @@ class SMTPClient:
         """
         select_response = await self.client.select(f'"{folder}"')
         if select_response.result != "OK":
-            logger.debug(f"Cannot select folder {folder} for {self.config.name}, skipping")
+            logger.debug("Cannot select folder %s for %s, skipping", folder, self.config.name)
             return
 
         search_response = await self.client.search("ALL")
         if search_response.result != "OK":
-            logger.warning(f"Search failed in folder {folder} for {self.config.name}")
+            logger.warning("Search failed in folder %s for %s", folder, self.config.name)
             return
 
         message_ids = search_response.lines[0].decode().split()
         if not message_ids:
-            logger.debug(f"No emails found in folder {folder} for {self.config.name}")
+            logger.debug("No emails found in folder %s for %s", folder, self.config.name)
             return
 
         total = len(message_ids)
-        logger.info(f"Found {total} emails in folder {folder} for {self.config.name}")
+        logger.info("Found %s emails in folder %s for %s", total, folder, self.config.name)
 
         if limit and total > limit:
             message_ids = message_ids[-limit:]
@@ -180,20 +171,20 @@ class SMTPClient:
                     if email_data:
                         batch.append(email_data)
                 else:
-                    logger.warning(f"Failed to fetch message {msg_id} from {folder} in {self.config.name}")
+                    logger.warning("Failed to fetch message %s from %s in %s", msg_id, folder, self.config.name)
             except Exception as e:
-                logger.error(f"Error fetching message {msg_id} from {folder} in {self.config.name}: {e}")
+                logger.error("Error fetching message %s from %s in %s: %s", msg_id, folder, self.config.name, e)
                 continue
 
             # Yield batch when full
             if len(batch) >= self.BATCH_SIZE:
-                logger.info(f"Progress: {i + 1}/{total} fetched from {folder} in {self.config.name}")
+                logger.info("Progress: %s/%s fetched from %s in %s", i + 1, total, folder, self.config.name)
                 yield batch
                 batch = []
 
         # Yield remaining
         if batch:
-            logger.info(f"Progress: {i + 1}/{total} fetched from {folder} in {self.config.name}")
+            logger.info("Progress: %s/%s fetched from %s in %s", i + 1, total, folder, self.config.name)
             yield batch
 
     async def _parse_email(self, raw_email: bytes, uid: str) -> Optional[Dict]:
@@ -227,14 +218,14 @@ class SMTPClient:
                     if payload is None:
                         continue
                     if content_type == "text/plain":
-                        body_plain += payload.decode('utf-8', errors='ignore')
+                        body_plain += payload.decode("utf-8", errors="ignore")
                     elif content_type == "text/html":
-                        body_html += payload.decode('utf-8', errors='ignore')
+                        body_html += payload.decode("utf-8", errors="ignore")
             else:
                 content_type = msg.get_content_type()
                 payload = msg.get_payload(decode=True)
                 if payload:
-                    decoded = payload.decode('utf-8', errors='ignore')
+                    decoded = payload.decode("utf-8", errors="ignore")
                     if content_type == "text/plain":
                         body_plain = decoded
                     elif content_type == "text/html":
@@ -258,11 +249,11 @@ class SMTPClient:
                 "email_date": email_date,
                 "content_size": len(raw_email),
                 "attachment_count": attachment_count,
-                "raw_email": raw_email
+                "raw_email": raw_email,
             }
 
         except Exception as e:
-            logger.error(f"Error parsing email from {self.config.name}: {e}")
+            logger.error("Error parsing email from %s: %s", self.config.name, e)
             return None
 
     def __del__(self):

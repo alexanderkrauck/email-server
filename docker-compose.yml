@@ -1,19 +1,37 @@
-version: '3.8'
-
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: email-server-postgres
+    environment:
+      POSTGRES_DB: emailserver
+      POSTGRES_USER: emailserver
+      POSTGRES_PASSWORD: emailserver
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U emailserver"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+
   email-server:
     build: .
     container_name: email-server
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "127.0.0.1:8002:8000"  # HTTP API - localhost only
       - "127.0.0.1:2525:2525"  # SMTP port - localhost only
-    volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
     environment:
-      - EMAILSERVER_DATABASE_URL=sqlite:////app/data/emailserver.db
-      - EMAILSERVER_LOG_FILE=/app/data/emailserver.log
-      - EMAILSERVER_EMAIL_LOG_DIR=/app/data/emails
+      - EMAILSERVER_DATABASE_URL=postgresql://emailserver:emailserver@postgres:5432/emailserver
       - EMAILSERVER_API_HOST=0.0.0.0
       - EMAILSERVER_API_PORT=8000
       - EMAILSERVER_LOG_LEVEL=INFO
@@ -32,5 +50,5 @@ services:
           memory: 256M
 
 volumes:
-  email_data:
+  pgdata:
     driver: local

@@ -1,44 +1,40 @@
--- Factory Reset SQL for Email Server
+-- Factory Reset SQL for Email Server (PostgreSQL)
 -- Wipes all email data while preserving account configurations
 --
 -- Usage:
---   sqlite3 emailserver.db < factory_reset.sql
+--   psql $DATABASE_URL -f factory_reset.sql
 --
--- Or run interactively with:
---   sqlite3 emailserver.db
---   .read factory_reset.sql
+-- Or run interactively:
+--   psql $DATABASE_URL
+--   \i factory_reset.sql
 
-.print "=== Email Server Factory Reset ==="
-.print ""
+\echo '=== Email Server Factory Reset ==='
+\echo ''
 
 -- Show current state
-.print "Before reset:"
+\echo 'Before reset:'
 SELECT 'Accounts (will be preserved): ' || COUNT(*) FROM smtp_configs;
 SELECT 'Emails (will be deleted): ' || COUNT(*) FROM email_logs;
 SELECT 'Attachments (will be deleted): ' || COUNT(*) FROM email_attachments;
-.print ""
+\echo ''
 
--- Delete all attachment records
-.print "Deleting attachment records..."
-DELETE FROM email_attachments;
-.print "Done."
-
--- Delete all email logs
-.print "Deleting email logs..."
-DELETE FROM email_logs;
-.print "Done."
+-- Truncate all email data (CASCADE handles foreign keys)
+\echo 'Truncating email data...'
+TRUNCATE TABLE email_attachments CASCADE;
+TRUNCATE TABLE email_logs CASCADE;
+TRUNCATE TABLE email_status CASCADE;
+\echo 'Done.'
 
 -- Vacuum to reclaim space
-.print "Vacuuming database..."
-VACUUM;
-.print "Done."
-.print ""
+\echo 'Vacuuming database...'
+VACUUM FULL;
+\echo 'Done.'
+\echo ''
 
 -- Show after state
-.print "After reset:"
+\echo 'After reset:'
 SELECT 'Accounts preserved: ' || COUNT(*) FROM smtp_configs;
 SELECT 'Emails remaining: ' || COUNT(*) FROM email_logs;
 SELECT 'Attachments remaining: ' || COUNT(*) FROM email_attachments;
-.print ""
-.print "=== Reset Complete ==="
-.print "Note: You must manually clean up storage files in the emails/ directory"
+\echo ''
+\echo '=== Reset Complete ==='

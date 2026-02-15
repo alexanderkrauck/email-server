@@ -1,5 +1,5 @@
 #!/bin/bash
-# Factory Reset Script for Email Server
+# Factory Reset Script for Email Server (PostgreSQL)
 # Wipes all data for all accounts while preserving account registration
 #
 # Usage:
@@ -10,15 +10,10 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-
-if [[ -f "/app/data/emailserver.db" ]]; then
-    DB_PATH="${DB_PATH:-/app/data/emailserver.db}"
-    DATA_DIR="${DATA_DIR:-/app/data}"
-else
-    DB_PATH="${DB_PATH:-$PROJECT_DIR/data/emailserver.db}"
-    DATA_DIR="${DATA_DIR:-$PROJECT_DIR/data}"
-fi
 COMPOSE_FILE="$PROJECT_DIR/docker-compose.yml"
+
+# Default connection - works inside docker network
+DB_URL="${EMAILSERVER_DATABASE_URL:-postgresql://emailserver:emailserver@localhost:5432/emailserver}"
 DRY_RUN=false
 FORCE=false
 BUILD=false
@@ -30,8 +25,13 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+# Helper to run psql commands
+run_psql() {
+    psql "$DB_URL" -t -A -c "$1" 2>/dev/null
+}
+
 usage() {
-    echo "Factory Reset for Email Server"
+    echo "Factory Reset for Email Server (PostgreSQL)"
     echo ""
     echo "Wipes all email data, attachments, and sync state while preserving"
     echo "account registrations (SMTP/IMAP configs)."
@@ -42,15 +42,14 @@ usage() {
     echo "  --dry-run       Show what would be deleted without making changes"
     echo "  --force         Actually perform the reset (required for destructive ops)"
     echo "  --build         Rebuild Docker image before restarting container"
-    echo "  --db PATH       Path to SQLite database (default: /app/data/emailserver.db)"
-    echo "  --data-dir DIR  Path to data directory (default: /app/data)"
+    echo "  --db-url URL    PostgreSQL connection URL (default: from EMAILSERVER_DATABASE_URL)"
     echo "  -h, --help      Show this help message"
     echo ""
     echo "Examples:"
-    echo "  $0 --dry-run                              # Preview what would be deleted"
-    echo "  $0 --force                                # Perform reset"
-    echo "  $0 --force --build                        # Reset and rebuild Docker image"
-    echo "  $0 --dry-run --db ./data/emailserver.db   # Use custom DB path"
+    echo "  $0 --dry-run"
+    echo "  $0 --force"
+    echo "  $0 --force --build"
+    echo "  $0 --dry-run --db-url postgresql://user:pass@localhost:5432/emailserver"
     exit 1
 }
 
@@ -69,12 +68,8 @@ while [[ $# -gt 0 ]]; do
             BUILD=true
             shift
             ;;
-        --db)
-            DB_PATH="$2"
-            shift 2
-            ;;
-        --data-dir)
-            DATA_DIR="$2"
+        --db-url)
+            DB_URL="$2"
             shift 2
             ;;
         -h|--help)
@@ -96,27 +91,30 @@ if [[ "$DRY_RUN" == false && "$FORCE" == false ]]; then
     exit 1
 fi
 
-# Check if DB exists
-if [[ ! -f "$DB_PATH" ]]; then
-    echo -e "${RED}Error: Database not found at $DB_PATH${NC}"
+# Check psql is available
+if ! command -v psql &> /dev/null; then
+    echo -e "${RED}Error: psql not found. Install postgresql-client.${NC}"
+    exit 1
+fi
+
+# Test connection
+if ! run_psql "SELECT 1" > /dev/null 2>&1; then
+    echo -e "${RED}Error: Cannot connect to database at $DB_URL${NC}"
     exit 1
 fi
 
 echo -e "${GREEN}=== Email Server Factory Reset ===${NC}"
 echo ""
-echo "Database: $DB_PATH"
-echo "Data directory: $DATA_DIR"
+echo "Database: $(echo "$DB_URL" | sed 's/:[^@]*@/@/')"
 echo "Mode: $([[ "$DRY_RUN" == true ]] && echo "DRY RUN (preview only)" || echo "LIVE (destructive)")"
 echo ""
 
-# Get account count before
-ACCOUNT_COUNT=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM smtp_configs;" 2>/dev/null || echo "0")
+# Get data counts
+ACCOUNT_COUNT=$(run_psql "SELECT COUNT(*) FROM smtp_configs;")
+EMAIL_COUNT=$(run_psql "SELECT COUNT(*) FROM email_logs;")
+ATTACHMENT_COUNT=$(run_psql "SELECT COUNT(*) FROM email_attachments;")
+
 echo "Registered accounts (will be preserved): $ACCOUNT_COUNT"
-
-# Get data counts before
-EMAIL_COUNT=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM email_logs;" 2>/dev/null || echo "0")
-ATTACHMENT_COUNT=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM email_attachments;" 2>/dev/null || echo "0")
-
 echo "Emails to delete: $EMAIL_COUNT"
 echo "Attachments to delete: $ATTACHMENT_COUNT"
 echo ""
@@ -124,23 +122,15 @@ echo ""
 # Show account details
 if [[ $ACCOUNT_COUNT -gt 0 ]]; then
     echo "Accounts that will be preserved:"
-    sqlite3 "$DB_PATH" "SELECT id, name, account_name, host FROM smtp_configs;" | while read line; do
+    run_psql "SELECT id || ': ' || name || ' (' || account_name || ') @ ' || host FROM smtp_configs;" | while read line; do
         echo "  - $line"
     done
     echo ""
 fi
 
-# Calculate storage size
-if [[ -d "$DATA_DIR" ]]; then
-    DATA_SIZE=$(du -sh "$DATA_DIR" 2>/dev/null | cut -f1)
-    echo "Current data directory size: $DATA_SIZE"
-    
-    # Check for email subdirectories
-    if [[ -d "$DATA_DIR/emails" ]]; then
-        EMAILS_SIZE=$(du -sh "$DATA_DIR/emails" 2>/dev/null | cut -f1)
-        echo "  - emails/: $EMAILS_SIZE"
-    fi
-fi
+# Database size
+DB_SIZE=$(run_psql "SELECT pg_size_pretty(pg_database_size(current_database()));")
+echo "Current database size: $DB_SIZE"
 echo ""
 
 # Check if container is running
@@ -158,26 +148,22 @@ if [[ "$DRY_RUN" == true ]]; then
         echo ""
     fi
     echo "DATABASE OPERATIONS:"
-    echo "  2. DELETE FROM email_attachments (all $ATTACHMENT_COUNT records)"
-    echo "  3. DELETE FROM email_logs (all $EMAIL_COUNT records)"
-    echo "  4. VACUUM database to reclaim space"
-    echo ""
-    echo "STORAGE OPERATIONS:"
-    echo "  5. Remove all files under $DATA_DIR/emails/"
-    echo "  6. Remove temp files from /tmp/email_attachments/"
+    echo "  2. TRUNCATE email_attachments CASCADE ($ATTACHMENT_COUNT records)"
+    echo "  3. TRUNCATE email_logs CASCADE ($EMAIL_COUNT records)"
+    echo "  4. TRUNCATE email_status CASCADE"
+    echo "  5. VACUUM FULL to reclaim space"
     echo ""
     if [[ "$BUILD" == true ]]; then
         echo "CONTAINER:"
-        echo "  7. Rebuild and start email-server container"
+        echo "  6. Rebuild and start email-server container"
         echo ""
     elif is_container_running; then
         echo "CONTAINER:"
-        echo "  7. Restart email-server container"
+        echo "  6. Restart email-server container"
         echo ""
     fi
     echo "PRESERVED (NOT DELETED):"
     echo "  - smtp_configs table (all $ACCOUNT_COUNT accounts)"
-    echo "  - Database file itself"
     echo ""
     echo -e "${GREEN}Run with --force to actually perform the reset.${NC}"
     exit 0
@@ -189,54 +175,33 @@ echo ""
 # Step 0: Stop container if running
 if is_container_running; then
     CONTAINER_WAS_RUNNING=true
-    echo "[0/6] Stopping email-server container..."
+    echo "[0/5] Stopping email-server container..."
     docker stop email-server
     echo "      Done."
 else
-    echo "[0/6] Container not running, skipping stop."
+    echo "[0/5] Container not running, skipping stop."
 fi
 
-# Step 1: Delete attachment records
-echo "[1/6] Deleting attachment records..."
-sqlite3 "$DB_PATH" "DELETE FROM email_attachments;"
+# Step 1: Truncate tables
+echo "[1/5] Clearing database tables..."
+run_psql "TRUNCATE TABLE email_attachments CASCADE;"
+echo "      Truncated email_attachments."
+run_psql "TRUNCATE TABLE email_logs CASCADE;"
+echo "      Truncated email_logs."
+run_psql "TRUNCATE TABLE email_status CASCADE;" 2>/dev/null || true
+echo "      Truncated email_status."
 echo "      Done."
 
-# Step 2: Delete email logs
-echo "[2/6] Deleting email logs..."
-sqlite3 "$DB_PATH" "DELETE FROM email_logs;"
+# Step 2: Vacuum
+echo "[2/5] Vacuuming database..."
+run_psql "VACUUM FULL;"
 echo "      Done."
 
-# Step 3: Vacuum database
-echo "[3/6] Vacuuming database..."
-sqlite3 "$DB_PATH" "VACUUM;"
-echo "      Done."
-
-# Step 4: Clean up storage
-echo "[4/6] Cleaning up storage directories..."
-
-# Remove all email subdirectories but keep structure
-if [[ -d "$DATA_DIR/emails" ]]; then
-    # Find all account directories and remove their contents
-    find "$DATA_DIR/emails" -mindepth 1 -maxdepth 1 -type d | while read account_dir; do
-        echo "      Cleaning $(basename "$account_dir")..."
-        rm -rf "$account_dir"/*
-    done
-    echo "      Email directories cleaned."
-fi
-
-# Remove temp files
-if [[ -d "/tmp/email_attachments" ]]; then
-    rm -rf /tmp/email_attachments/*
-    echo "      Temp files cleaned."
-fi
-
-echo "      Done."
-
-# Step 5: Verify
-echo "[5/6] Verifying reset..."
-NEW_EMAIL_COUNT=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM email_logs;")
-NEW_ATTACHMENT_COUNT=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM email_attachments;")
-NEW_ACCOUNT_COUNT=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM smtp_configs;")
+# Step 3: Verify
+echo "[3/5] Verifying reset..."
+NEW_EMAIL_COUNT=$(run_psql "SELECT COUNT(*) FROM email_logs;")
+NEW_ATTACHMENT_COUNT=$(run_psql "SELECT COUNT(*) FROM email_attachments;")
+NEW_ACCOUNT_COUNT=$(run_psql "SELECT COUNT(*) FROM smtp_configs;")
 
 echo ""
 echo -e "${GREEN}=== Reset Complete ===${NC}"
@@ -248,15 +213,15 @@ echo "  Attachments: $NEW_ATTACHMENT_COUNT"
 echo ""
 
 if [[ $NEW_EMAIL_COUNT -eq 0 && $NEW_ATTACHMENT_COUNT -eq 0 && $NEW_ACCOUNT_COUNT -eq $ACCOUNT_COUNT ]]; then
-    # Step 6: Rebuild and/or restart container
+    # Step 4: Rebuild and/or restart container
     if [[ "$BUILD" == true ]]; then
-        echo "[6/6] Rebuilding and starting email-server container..."
+        echo "[4/5] Rebuilding and starting email-server container..."
         docker rm -f email-server 2>/dev/null || true
         docker compose -f "$COMPOSE_FILE" up -d --build
         echo "      Done."
         echo ""
     elif [[ "$CONTAINER_WAS_RUNNING" == true ]]; then
-        echo "[6/6] Starting email-server container..."
+        echo "[4/5] Starting email-server container..."
         docker start email-server
         echo "      Done."
         echo ""

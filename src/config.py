@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     # Database
-    database_url: str = "sqlite:////app/data/emailserver.db"
+    database_url: str = "postgresql://emailserver:emailserver@postgres:5432/emailserver"
     database_echo: bool = False
 
     # API
@@ -21,39 +21,27 @@ class Settings(BaseSettings):
     email_check_interval: int = 30  # seconds
     max_emails_per_batch: int = 50
 
-    # File Logging
-    email_log_dir: str = "/app/data/emails"
-    log_format: str = "json"  # json or text
-
     # Attachment Settings
     max_attachment_size: int = 10 * 1024 * 1024  # 10MB
-    inline_attachment_size: int = 1024 * 1024  # 1MB - store in DB vs filesystem
-    allowed_attachment_types: list = []  # Empty means all types allowed
 
     # Text-Only Storage (Global Settings - permissive defaults)
     # Global stronger negative: if global=False, account CANNOT enable it
-    # Set all to False to allow accounts to configure as they wish
-    store_text_only: bool = False  # Allow accounts to enable text-only storage
+    store_text_only: bool = False
     max_attachment_size_text: int = 10 * 1024 * 1024  # Max size for text extraction
 
     # Text Extraction Settings (which types to extract text from)
-    # Set to True to allow accounts to enable individually (account can disable by setting to False)
-    extract_pdf_text: bool = True  # Allow accounts to enable PDF -> text
-    extract_docx_text: bool = True  # Allow accounts to enable DOCX -> text
-    extract_image_text: bool = True  # OCR (off by default, accounts can enable)
-    extract_other_text: bool = True  # Allow accounts to enable other text extraction
-
-    # Search Settings
-    search_index_enabled: bool = False
-    search_index_dir: str = "/app/data/search-index"
+    extract_pdf_text: bool = True
+    extract_docx_text: bool = True
+    extract_image_text: bool = True
+    extract_other_text: bool = True
 
     # Security
     require_auth: bool = False
-    allowed_senders: list = []  # Empty means all senders allowed
+    allowed_senders: list = []
 
     # Logging
     log_level: str = "INFO"
-    log_file: str = "/app/data/emailserver.log"
+    log_file: str = ""  # Empty = stdout only (stateless). Set to path for file logging.
 
     # MCP
     mcp_enabled: bool = True

@@ -1,61 +1,28 @@
-# Use Python 3.11 Alpine for minimal size (like chronotask)
 FROM python:3.11-alpine
 
-# Install system dependencies
-# - ripgrep: for regex search
-# - tesseract-ocr: for image text extraction (OCR)
-# - tesseract-ocr-data-eng: English language data for OCR
-# - leptonica: image processing library for OCR
-# - py3-pillow: for image handling
-# - gcc, musl-dev, libffi-dev, etc.: build dependencies for Python packages
+# System dependencies
+# - postgresql-dev: needed for psycopg2
+# - tesseract-ocr: optional OCR for image attachments
 RUN apk add --no-cache \
-    gcc \
-    musl-dev \
-    libffi-dev \
-    openssl-dev \
-    python3-dev \
-    curl \
-    ripgrep \
-    tesseract-ocr \
-    tesseract-ocr-data-eng \
-    leptonica \
-    py3-pillow \
+    gcc musl-dev libffi-dev openssl-dev python3-dev curl \
+    postgresql-dev \
+    tesseract-ocr tesseract-ocr-data-eng leptonica py3-pillow \
     && rm -rf /var/cache/apk/*
 
-# Set working directory
 WORKDIR /app
 
-# Copy requirements first for better caching
 COPY requirements.txt .
-
-# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
 COPY src/ ./src/
 
-# Create data directory for database and email logs
-RUN mkdir -p /app/data/emails
+# Create non-root user
+RUN adduser -D -u 1000 emailserver
+USER emailserver
 
-# Create non-root user for security
-RUN adduser -D -u 1000 emailserver && \
-    chmod -R 777 /app/data
-
-# For testing, run as root (like chronotask pattern)
-# USER emailserver
-
-# Expose HTTP API port and SMTP port
 EXPOSE 8000 2525
 
-# Volume for persistent data
-VOLUME ["/app/data"]
-
-# Environment variables
-ENV EMAILSERVER_DATABASE_URL=sqlite:////app/data/emailserver.db \
-    EMAILSERVER_LOG_FILE=/app/data/emailserver.log \
-    EMAILSERVER_EMAIL_LOG_DIR=/app/data/emails \
+ENV EMAILSERVER_DATABASE_URL=postgresql://emailserver:emailserver@postgres:5432/emailserver \
     PYTHONUNBUFFERED=1
 
-# Default command - run HTTP server
-WORKDIR /app
 CMD ["python", "-m", "src.main"]

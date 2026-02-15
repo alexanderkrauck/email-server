@@ -1,6 +1,5 @@
 """Tests for storage config resolver."""
 
-import pytest
 from unittest.mock import patch
 
 
@@ -53,7 +52,7 @@ def test_resolve_storage_config_with_none_override():
 
 def test_should_extract_text():
     """Test should_extract_text function."""
-    from src.storage_config.resolver import should_extract_text, StorageConfig
+    from src.storage_config.resolver import StorageConfig, should_extract_text
 
     config = StorageConfig(
         store_text_only=False,
@@ -72,7 +71,7 @@ def test_should_extract_text():
 
 def test_should_extract_text_disabled():
     """Test should_extract_text when extraction is disabled."""
-    from src.storage_config.resolver import should_extract_text, StorageConfig
+    from src.storage_config.resolver import StorageConfig, should_extract_text
 
     config = StorageConfig(
         store_text_only=False,

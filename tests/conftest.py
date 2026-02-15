@@ -1,24 +1,13 @@
 """Test configuration and fixtures."""
 
-import pytest
 import os
-import tempfile
-import shutil
-from pathlib import Path
 from datetime import datetime
 
-os.environ["DATABASE_URL"] = "sqlite:///test_emailserver.db"
-os.environ["EMAIL_LOG_DIR"] = "/tmp/test_emails"
+import pytest
+
+os.environ["EMAILSERVER_DATABASE_URL"] = "postgresql://emailserver:emailserver@localhost:5432/emailserver_test"
 os.environ["EMAILSERVER_API_HOST"] = "0.0.0.0"
 os.environ["EMAILSERVER_API_PORT"] = "8000"
-
-
-@pytest.fixture
-def temp_dir():
-    """Create a temporary directory for tests."""
-    tmpdir = tempfile.mkdtemp()
-    yield tmpdir
-    shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 @pytest.fixture

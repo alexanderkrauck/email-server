@@ -98,4 +98,12 @@ def init_database():
                 db.execute(text(f"ALTER TABLE smtp_configs ADD COLUMN {column_name} {column_def}"))
                 db.commit()
 
+        # Add text_file_path column to email_attachments if it doesn't exist
+        try:
+            db.execute(text("SELECT text_file_path FROM email_attachments LIMIT 1"))
+        except Exception:
+            logger.info("Adding text_file_path column to email_attachments table")
+            db.execute(text("ALTER TABLE email_attachments ADD COLUMN text_file_path TEXT NULL"))
+            db.commit()
+
     logger.info("Database initialized successfully")

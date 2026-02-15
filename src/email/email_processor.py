@@ -119,6 +119,15 @@ class EmailProcessor:
                     if smtp_config:
                         account_email = smtp_config.account_name if smtp_config.account_name else smtp_config.username
                     
+                    # Check if email already exists (upsert pattern)
+                    existing_email = db.query(EmailLog).filter(
+                        EmailLog.message_id == email_data["message_id"]
+                    ).first()
+                    
+                    if existing_email:
+                        logger.debug(f"Email already exists: {email_data['message_id']}")
+                        continue
+                    
                     email_log = EmailLog(
                         smtp_config_id=email_data["smtp_config_id"],
                         sender=email_data["sender"],

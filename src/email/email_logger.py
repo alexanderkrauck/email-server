@@ -8,6 +8,7 @@ from typing import Dict, Optional
 
 from src.config import settings
 from src.email.markdown_converter import EmailToMarkdownConverter
+from src.email.text_extractor import TextExtractor
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +69,7 @@ class EmailLogger:
         body_text = email_data.get("body_plain", "")
         
         if not body_text and email_data.get("body_html"):
-            body_text = await text_extractor._extract_html(
+            body_text = text_extractor._extract_html(
                 email_data["body_html"].encode('utf-8')
             )
         

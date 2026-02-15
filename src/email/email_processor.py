@@ -142,8 +142,9 @@ class EmailProcessor:
                     db.flush()
 
                     file_path = await logger_instance.log_email_to_file(email_data, email_log.id, account_email)
-                    if file_path:
-                        email_log.log_file_path = file_path
+                    if not file_path:
+                        raise ValueError(f"Failed to write email to file for message_id: {email_data['message_id']}")
+                    email_log.log_file_path = file_path
 
                     if email_data["attachment_count"] > 0 and "raw_email" in email_data:
                         attachments = await attachment_handler.extract_attachments(

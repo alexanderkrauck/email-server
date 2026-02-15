@@ -1,10 +1,7 @@
 """Configuration resolver with global stronger negative logic."""
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
-
-if TYPE_CHECKING:
-    from src.models.smtp_config import SMTPConfig
+from typing import Optional
 
 from src.config import settings
 from src.models.smtp_config import SMTPConfig

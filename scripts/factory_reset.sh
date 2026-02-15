@@ -150,8 +150,7 @@ if [[ "$DRY_RUN" == true ]]; then
     echo "DATABASE OPERATIONS:"
     echo "  2. TRUNCATE email_attachments CASCADE ($ATTACHMENT_COUNT records)"
     echo "  3. TRUNCATE email_logs CASCADE ($EMAIL_COUNT records)"
-    echo "  4. TRUNCATE email_status CASCADE"
-    echo "  5. VACUUM FULL to reclaim space"
+    echo "  4. VACUUM FULL to reclaim space"
     echo ""
     if [[ "$BUILD" == true ]]; then
         echo "CONTAINER:"
@@ -188,8 +187,6 @@ run_psql "TRUNCATE TABLE email_attachments CASCADE;"
 echo "      Truncated email_attachments."
 run_psql "TRUNCATE TABLE email_logs CASCADE;"
 echo "      Truncated email_logs."
-run_psql "TRUNCATE TABLE email_status CASCADE;" 2>/dev/null || true
-echo "      Truncated email_status."
 echo "      Done."
 
 # Step 2: Vacuum

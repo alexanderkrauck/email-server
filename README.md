@@ -1,303 +1,211 @@
 # Email Server
 
-A Python-based multi-SMTP email server that connects to multiple email accounts, retrieves emails, and logs their content to files. Built with FastAPI and FastMCP, following the chronotask project architecture pattern.
-
-## Features
-
-- **Multi-SMTP Support**: Connect to multiple email servers simultaneously
-- **Email Content Logging**: Save email content to structured files (JSON or text format)
-- **Attachment Handling**: Extract, store, and serve email attachments with metadata
-- **Email Sending**: Full SMTP sending capabilities with templates and attachments
-- **REST API**: Full RESTful API for managing SMTP configurations and viewing emails
-- **MCP Integration**: Model Context Protocol support for AI agent interactions
-- **Database Storage**: SQLite database for email metadata and server configurations
-- **Background Processing**: Continuous email checking and processing
-- **Docker Support**: Containerized deployment with Docker and docker-compose
-- **File Management**: Automatic cleanup of old log files
+Multi-account email server with PostgreSQL storage, REST API, and MCP integration. Connects to IMAP accounts, syncs emails into Postgres (body + attachment text), and exposes everything via FastAPI.
 
 ## Quick Start
 
-### Using Docker Compose (Recommended)
-
 ```bash
-# Clone and navigate to the project
-cd email-server
+# Start Postgres + email server
+docker compose up -d
 
-# Start the service
-docker-compose up -d
+# Check health
+curl http://localhost:8002/api/v1/health
 
-# View logs
-docker-compose logs -f email-server
+# Add an email account
+curl -X POST http://localhost:8002/api/v1/smtp-configs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Gmail",
+    "host": "imap.gmail.com",
+    "port": 993,
+    "username": "you@gmail.com",
+    "password": "your-app-password",
+    "smtp_host": "smtp.gmail.com",
+    "smtp_port": 587,
+    "imap_use_ssl": true,
+    "smtp_use_tls": true,
+    "enabled": true
+  }'
+
+# Emails sync automatically. Search them:
+curl "http://localhost:8002/api/v1/emails/search?query=invoice"
 ```
 
-### Manual Docker Build
+## Architecture
 
-```bash
-# Build the image
-docker build -t email-server .
+- **Database**: PostgreSQL 16 (all email content stored in DB, no filesystem)
+- **Framework**: FastAPI + SQLAlchemy ORM
+- **MCP**: FastMCP mounted at `/llm/mcp`
+- **Deployment**: Docker Compose (stateless compute + one Postgres connection)
 
-# Run the container
-docker run -d \
-  --name email-server \
-  -p 8000:8000 \
-  -v $(pwd)/data:/app/data \
-  email-server
 ```
-
-### Local Development
-
-```bash
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Run the server
-cd src
-python main.py
+email-server/
+├── docker-compose.yml         # Postgres + email-server
+├── Dockerfile                 # Python 3.11 Alpine, non-root user
+├── requirements.txt
+├── src/
+│   ├── main.py                # Entry point, logging config
+│   ├── server.py              # FastAPI app + MCP setup
+│   ├── config.py              # Pydantic settings (env vars)
+│   ├── models/
+│   │   ├── base.py            # SQLAlchemy declarative base
+│   │   ├── email.py           # EmailLog (body_plain, body_html)
+│   │   ├── smtp_config.py     # SMTPConfig (IMAP/SMTP credentials)
+│   │   └── attachment.py      # EmailAttachment (text_content in DB)
+│   ├── database/
+│   │   └── connection.py      # Engine, session factory, init_database()
+│   ├── handlers/
+│   │   └── email_handler.py   # All API routes (CRUD, search, send, reply, forward)
+│   ├── email/
+│   │   ├── smtp_client.py     # IMAP client (batch fetch, folder scanning)
+│   │   ├── email_processor.py # Background sync loop
+│   │   ├── smtp_sender.py     # SMTP sending (reply, forward, attachments)
+│   │   ├── attachment_handler.py  # Extract attachments, store text_content in DB
+│   │   └── text_extractor.py  # PDF, DOCX, image OCR, plaintext extraction
+│   └── storage_config/
+│       └── resolver.py        # Per-account storage config resolution
+├── scripts/
+│   ├── factory_reset.py       # Wipe all emails, preserve accounts (Python)
+│   ├── factory_reset.sh       # Same but shell script
+│   └── factory_reset.sql      # Same but raw SQL
+└── tests/
+    ├── conftest.py
+    ├── test_database.py
+    ├── test_attachment_handler.py
+    ├── test_models.py
+    ├── test_smtp_client.py
+    ├── test_storage_config.py
+    └── test_text_extractor.py
 ```
 
 ## Configuration
 
-The server uses environment variables with the `EMAILSERVER_` prefix:
+Environment variables with `EMAILSERVER_` prefix:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `EMAILSERVER_DATABASE_URL` | `sqlite:////app/data/emailserver.db` | Database connection string |
-| `EMAILSERVER_API_HOST` | `0.0.0.0` | API server host |
-| `EMAILSERVER_API_PORT` | `8000` | API server port |
-| `EMAILSERVER_EMAIL_LOG_DIR` | `/app/data/emails` | Directory for email log files |
+| `EMAILSERVER_DATABASE_URL` | `postgresql://emailserver:emailserver@postgres:5432/emailserver` | PostgreSQL connection string |
+| `EMAILSERVER_API_HOST` | `0.0.0.0` | API bind address |
+| `EMAILSERVER_API_PORT` | `8000` | API port |
 | `EMAILSERVER_LOG_LEVEL` | `INFO` | Logging level |
-| `EMAILSERVER_LOG_FORMAT` | `json` | Email log format (json/text) |
-| `EMAILSERVER_EMAIL_CHECK_INTERVAL` | `30` | Email check interval in seconds |
+| `EMAILSERVER_LOG_FILE` | `""` (stdout) | Log file path (empty = stdout only) |
+| `EMAILSERVER_EMAIL_CHECK_INTERVAL` | `30` | Sync interval in seconds |
 | `EMAILSERVER_MAX_ATTACHMENT_SIZE` | `10485760` | Max attachment size (10MB) |
-| `EMAILSERVER_INLINE_ATTACHMENT_SIZE` | `1048576` | Size limit for DB storage (1MB) |
-| `EMAILSERVER_MCP_ENABLED` | `true` | Enable MCP support |
-| `EMAILSERVER_MCP_PORT` | `8001` | MCP server port |
+| `EMAILSERVER_MCP_ENABLED` | `true` | Enable MCP endpoint |
 
-## API Usage
+For external Postgres, just set `EMAILSERVER_DATABASE_URL` to your connection string.
 
-Once running, the server provides both HTTP API and MCP endpoints:
+## API Endpoints
 
-### API Documentation
-- **HTTP API**: http://localhost:8000/api/v1
-- **Swagger UI**: http://localhost:8000/api/v1/docs
-- **ReDoc**: http://localhost:8000/api/v1/redoc
-- **MCP Endpoint**: http://localhost:8000/llm/mcp
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/v1/health` | Health check |
+| `GET /api/v1/smtp-configs` | List email accounts |
+| `POST /api/v1/smtp-configs` | Add email account |
+| `PUT /api/v1/smtp-configs/{id}` | Update account |
+| `DELETE /api/v1/smtp-configs/{id}` | Delete account |
+| `POST /api/v1/smtp-configs/{id}/process` | Trigger manual sync |
+| `GET /api/v1/emails` | List emails (paginated) |
+| `GET /api/v1/emails/{id}` | Get full email content |
+| `GET /api/v1/emails/search` | Regex search (body, subject, sender, attachments) |
+| `POST /api/v1/send-email` | Send email |
+| `POST /api/v1/emails/{id}/reply` | Reply to email |
+| `POST /api/v1/emails/{id}/forward` | Forward email |
 
-### Key Endpoints
+- **Swagger UI**: http://localhost:8002/api/v1/docs
+- **MCP endpoint**: http://localhost:8002/llm/mcp
 
-#### SMTP Configuration Management
+### Search
+
+Search uses PostgreSQL `~*` (case-insensitive regex):
+
 ```bash
-# List all SMTP configurations
-curl http://localhost:8000/api/v1/smtp-configs
+# Simple word search
+curl "http://localhost:8002/api/v1/emails/search?query=invoice"
 
-# Create new SMTP configuration
-curl -X POST http://localhost:8000/api/v1/smtp-configs \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Gmail Account",
-    "host": "imap.gmail.com",
-    "port": 993,
-    "username": "your-email@gmail.com",
-    "password": "your-app-password",
-    "use_tls": true,
-    "use_ssl": true,
-    "enabled": true
-  }'
+# Regex pattern
+curl "http://localhost:8002/api/v1/emails/search?query=invoice|receipt"
 
-# Manually trigger processing for a server
-curl -X POST http://localhost:8000/api/v1/smtp-configs/1/process
+# Search in attachment text
+curl "http://localhost:8002/api/v1/emails/search?query=500.*EUR&search_attachments=true"
+
+# Filter by field
+curl "http://localhost:8002/api/v1/emails/search?query=alice&field=sender"
+
+# Filter by date range
+curl "http://localhost:8002/api/v1/emails/search?date_from=2025-01-01&date_to=2025-12-31"
 ```
 
-#### Email Management
+## Email Provider Setup
+
+### Gmail
+- Host: `imap.gmail.com`, Port: `993`, SSL: `true`
+- SMTP: `smtp.gmail.com`, Port: `587`, TLS: `true`
+- Use an [App Password](https://myaccount.google.com/apppasswords) (requires 2FA)
+
+### Outlook
+- Host: `outlook.office365.com`, Port: `993`, SSL: `true`
+- SMTP: `smtp.office365.com`, Port: `587`, TLS: `true`
+
+### Generic IMAP/SMTP
+- Set `host`, `port`, `smtp_host`, `smtp_port` to your provider's values
+- Set `imap_use_ssl`/`smtp_use_tls` as appropriate
+
+## Development
+
+### Code Style
+
+- **Python**: 3.11+
+- **Line length**: 120 characters
+- **Quotes**: Double quotes
+- **Linter**: `ruff check --line-length 120`
+- **Formatter**: `ruff format --line-length 120`
+- **Logging**: Use lazy `%s` formatting, not f-strings (`logger.info("msg %s", val)`)
+- **Imports**: stdlib, then third-party, then local (`from src.xxx import ...`)
+- **Types**: Use `Optional[X]` for nullable, type hints on all functions
+- **Models**: SQLAlchemy declarative with `from src.models.base import Base`
+- **Pydantic**: Use `Optional[str] = None` (not `str = None`) for optional fields
+
+### Running Tests
+
 ```bash
-# List processed emails
-curl http://localhost:8000/api/v1/emails
-
-# Get specific email content
-curl http://localhost:8000/api/v1/emails/1/content
-
-# List email attachments
-curl http://localhost:8000/api/v1/emails/1/attachments
-
-# Download attachment
-curl http://localhost:8000/api/v1/attachments/1 --output attachment.pdf
+# Requires a running Postgres (tests use real DB, not SQLite)
+pytest -v
+pytest --cov=src --cov-report=html
+pytest tests/test_attachment_handler.py -v
 ```
 
-#### Email Sending
+### Running Locally
+
 ```bash
-# Send simple email
-curl -X POST http://localhost:8000/api/v1/send-email \
-  -H "Content-Type: application/json" \
-  -d '{
-    "smtp_config_id": 1,
-    "to_addresses": ["recipient@example.com"],
-    "subject": "Test Email",
-    "body_text": "Hello from Email Server!",
-    "body_html": "<h1>Hello from Email Server!</h1>"
-  }'
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
 
-# Test SMTP connection
-curl http://localhost:8000/api/v1/smtp-configs/1/test-connection
+# Start Postgres (via docker compose or external)
+docker compose up -d postgres
+
+# Run the server
+EMAILSERVER_DATABASE_URL=postgresql://emailserver:emailserver@localhost:5432/emailserver \
+  python -m src.main
 ```
 
-#### System Status
+### Factory Reset
+
+Wipes all email data while preserving account configurations:
+
 ```bash
-# Check system status
-curl http://localhost:8000/api/v1/status
+# Preview
+python scripts/factory_reset.py --dry-run
 
-# Health check
-curl http://localhost:8000/health
-```
+# Execute
+python scripts/factory_reset.py --force
 
-## MCP Integration
+# Or via shell
+./scripts/factory_reset.sh --dry-run
+./scripts/factory_reset.sh --force
 
-The Email Server provides MCP (Model Context Protocol) support for AI agent interactions. This allows AI assistants like Claude to directly interact with the email server.
-
-### MCP Endpoint
-- **MCP Server**: http://localhost:8000/llm/mcp
-
-### Available MCP Functions
-All HTTP API endpoints are automatically exposed as MCP functions, including:
-- `get_api_v1_smtp_configs` - List SMTP configurations
-- `post_api_v1_smtp_configs` - Create SMTP configuration
-- `get_api_v1_emails` - List processed emails
-- `get_api_v1_emails_email_id_content` - Get email content
-- `get_api_v1_emails_email_id_attachments` - List email attachments
-- `get_api_v1_attachments_attachment_id` - Download attachment
-- `post_api_v1_send_email` - Send email
-- `post_api_v1_send_email_with_attachments` - Send email with attachments
-- `get_api_v1_status` - Get system status
-
-### Using with Claude Code
-Add the MCP server to your Claude Code configuration:
-
-```json
-{
-  "mcpServers": {
-    "email-server": {
-      "command": "curl",
-      "args": ["-X", "POST", "http://localhost:8000/llm/mcp"]
-    }
-  }
-}
-```
-
-## Email Server Configuration
-
-### Gmail Setup
-1. Enable 2-factor authentication
-2. Generate an app password
-3. Use these settings:
-   - Host: `imap.gmail.com`
-   - Port: `993`
-   - Use SSL: `true`
-   - Use TLS: `false`
-
-### Outlook/Hotmail Setup
-- Host: `outlook.office365.com`
-- Port: `993`
-- Use SSL: `true`
-
-### Yahoo Mail Setup
-- Host: `imap.mail.yahoo.com`
-- Port: `993`
-- Use SSL: `true`
-
-## File Structure
-
-```
-email-server/
-├── docker-compose.yml          # Docker Compose configuration
-├── Dockerfile                  # Docker build instructions
-├── requirements.txt            # Python dependencies
-├── README.md                  # This file
-├── src/                       # Source code
-│   ├── main.py               # Application entry point
-│   ├── server.py             # FastAPI server setup
-│   ├── config.py             # Configuration settings
-│   ├── models/               # Database models
-│   │   ├── smtp_config.py    # SMTP configuration model
-│   │   └── email.py          # Email log model
-│   ├── database/             # Database connection
-│   │   └── connection.py     # SQLAlchemy setup
-│   ├── email/                # Email processing
-│   │   ├── smtp_client.py    # IMAP client for fetching emails
-│   │   ├── email_processor.py # Email processing orchestrator
-│   │   └── email_logger.py   # File logging functionality
-│   └── handlers/             # API handlers
-│       └── email_handler.py  # FastAPI route handlers
-└── data/                     # Data directory (mounted volume)
-    ├── emailserver.db        # SQLite database
-    ├── emailserver.log       # Application logs
-    └── emails/               # Email content files
-```
-
-## Email Log Files
-
-Emails are logged to files in two formats:
-
-### JSON Format (default)
-```json
-{
-  "email_id": 1,
-  "timestamp": "2023-12-07T10:30:00",
-  "sender": "sender@example.com",
-  "recipient": "recipient@example.com",
-  "subject": "Test Email",
-  "body": {
-    "plain": "Plain text content",
-    "html": "<html>...</html>"
-  }
-}
-```
-
-### Text Format
-```
-================================================================================
-Email ID: 1
-From: sender@example.com
-To: recipient@example.com
-Subject: Test Email
-================================================================================
-PLAIN TEXT BODY:
-Hello, this is a test email.
---------------------------------------------------------------------------------
-```
-
-## Monitoring
-
-The server provides several monitoring endpoints:
-
-- `/health` - Basic health check
-- `/api/v1/status` - Detailed system status
-- `/api/v1/log-files` - List recent log files
-
-## Security Considerations
-
-- **Password Storage**: Passwords are stored in plain text in the database. For production use, implement encryption.
-- **API Security**: No authentication is implemented. Add API keys or OAuth for production.
-- **Network Security**: Use HTTPS in production and secure your email credentials.
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Connection Failed**: Check email server settings and credentials
-2. **Permission Denied**: Ensure proper file permissions for data directory
-3. **SSL Errors**: Verify SSL/TLS settings match your email provider
-
-### Logs
-Check application logs for detailed error information:
-```bash
-# Docker logs
-docker-compose logs -f email-server
-
-# Local file logs
-tail -f data/emailserver.log
+# Or raw SQL
+psql $DATABASE_URL -f scripts/factory_reset.sql
 ```
 
 ## License

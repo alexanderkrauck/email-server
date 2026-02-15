@@ -22,7 +22,6 @@ SELECT 'Attachments (will be deleted): ' || COUNT(*) FROM email_attachments;
 \echo 'Truncating email data...'
 TRUNCATE TABLE email_attachments CASCADE;
 TRUNCATE TABLE email_logs CASCADE;
-TRUNCATE TABLE email_status CASCADE;
 \echo 'Done.'
 
 -- Vacuum to reclaim space

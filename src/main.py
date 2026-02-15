@@ -3,14 +3,10 @@
 
 import logging
 import sys
-from pathlib import Path
 
 import uvicorn
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent))
-
-from config import settings
+from src.config import settings
 
 # Configure logging
 logging.basicConfig(

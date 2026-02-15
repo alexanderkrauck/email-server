@@ -32,7 +32,7 @@ DEFAULT_DB_URL = "postgresql://emailserver:emailserver@postgres:5432/emailserver
 KEEP_TABLES = ["smtp_configs"]
 
 # Tables to PURGE (all email data) - order matters for foreign keys
-PURGE_TABLES = ["email_attachments", "email_logs", "email_status"]
+PURGE_TABLES = ["email_attachments", "email_logs"]
 
 
 class FactoryReset:

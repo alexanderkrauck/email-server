@@ -115,9 +115,7 @@ class TextExtractor:
             import pypdf
 
             reader = pypdf.PdfReader(BytesIO(data))
-            text_parts = []
-            for page in reader.pages:
-                text_parts.append(page.extract_text())
+            text_parts = [page.extract_text() for page in reader.pages]
             return "\n".join(text_parts)
         except Exception as e:
             logger.warning("PDF extraction failed: %s", e)
@@ -131,9 +129,7 @@ class TextExtractor:
             import docx
 
             doc = docx.Document(BytesIO(data))
-            text_parts = []
-            for para in doc.paragraphs:
-                text_parts.append(para.text)
+            text_parts = [para.text for para in doc.paragraphs]
             return "\n".join(text_parts)
         except Exception as e:
             logger.warning("DOCX extraction failed: %s", e)

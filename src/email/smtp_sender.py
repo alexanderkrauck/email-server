@@ -3,7 +3,7 @@
 import logging
 import smtplib
 import ssl
-from datetime import datetime
+from datetime import datetime, timezone
 from email import encoders
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
@@ -95,9 +95,8 @@ class EmailSender:
         Returns:
             Dict with 'success' bool and 'message' string
         """
-        if not self._server:
-            if not await self.connect():
-                return {"success": False, "message": "Failed to connect to SMTP server"}
+        if not self._server and not await self.connect():
+            return {"success": False, "message": "Failed to connect to SMTP server"}
 
         try:
             # Create message
@@ -110,7 +109,7 @@ class EmailSender:
             msg["From"] = from_email
             msg["To"] = ", ".join(to_addresses)
             msg["Subject"] = subject
-            msg["Date"] = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
+            msg["Date"] = datetime.now(tz=timezone.utc).strftime("%a, %d %b %Y %H:%M:%S +0000")
 
             if cc_addresses:
                 msg["Cc"] = ", ".join(cc_addresses)

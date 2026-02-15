@@ -321,7 +321,7 @@ async def delete_smtp_config(config_id: int, db: Session = Depends(get_db)):
         raise HTTPException(
             status_code=409,
             detail=f"Cannot delete '{name}': it has associated emails. Delete the emails first.",
-        )
+        ) from None
 
     logger.info("Deleted SMTP config: %s", name)
     return {"message": f"SMTP configuration '{name}' deleted successfully"}
@@ -679,7 +679,7 @@ async def send_email(email_request: EmailSendRequest, db: Session = Depends(get_
 
     except Exception as e:
         logger.error("Error sending email: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.post("/send-email-with-attachments")
@@ -723,10 +723,10 @@ async def send_email_with_attachments(
         raise HTTPException(status_code=400, detail=result["message"])
 
     except json.JSONDecodeError:
-        raise HTTPException(status_code=400, detail="Invalid JSON in address fields")
+        raise HTTPException(status_code=400, detail="Invalid JSON in address fields") from None
     except Exception as e:
         logger.error("Error sending email with attachments: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 # ─── Reply and Forward endpoints ───
@@ -790,7 +790,7 @@ async def reply_to_email(email_id: int, reply_request: EmailReplyRequest, db: Se
         raise
     except Exception as e:
         logger.error("Error sending reply: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.post("/emails/{email_id}/forward")
@@ -865,7 +865,7 @@ async def forward_email(email_id: int, forward_request: EmailForwardRequest, db:
         raise
     except Exception as e:
         logger.error("Error forwarding email: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/smtp-configs/{config_id}/test-connection")
@@ -889,4 +889,4 @@ async def test_smtp_connection(config_id: int, db: Session = Depends(get_db)):
 
     except Exception as e:
         logger.error("Error testing SMTP connection: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e

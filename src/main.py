@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Main entry point for Email Server."""
 
 import logging
@@ -62,7 +61,7 @@ def main():
     except KeyboardInterrupt:
         logger.info("Shutting down Email Server...")
     except Exception as e:
-        logger.error("Fatal error: %s", e, exc_info=True)
+        logger.exception("Fatal error: %s", e)
         sys.exit(1)
 
 

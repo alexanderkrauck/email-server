@@ -1,7 +1,7 @@
 """Test configuration and fixtures."""
 
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 
@@ -19,7 +19,7 @@ def sample_email_data():
         "recipient": "recipient@example.com",
         "subject": "Test Email",
         "message_id": "<test-123@example.com>",
-        "email_date": datetime(2025, 1, 15, 10, 30, 0),
+        "email_date": datetime(2025, 1, 15, 10, 30, 0, tzinfo=timezone.utc),
         "body_plain": "This is a test email body.",
         "body_html": "<html><body><p>This is a test email body.</p></body></html>",
         "attachment_count": 0,
@@ -35,7 +35,7 @@ def sample_email_with_attachments():
         "recipient": "recipient@example.com",
         "subject": "Test Email with Attachments",
         "message_id": "<test-456@example.com>",
-        "email_date": datetime(2025, 1, 15, 10, 30, 0),
+        "email_date": datetime(2025, 1, 15, 10, 30, 0, tzinfo=timezone.utc),
         "body_plain": "This email has attachments.",
         "body_html": "<html><body><p>This email has attachments.</p></body></html>",
         "attachment_count": 2,

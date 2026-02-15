@@ -55,10 +55,7 @@ class AttachmentHandler:
         if filename or "attachment" in content_disposition:
             return True
 
-        if content_type.startswith(("image/", "audio/", "video/", "application/")):
-            return True
-
-        return False
+        return content_type.startswith(("image/", "audio/", "video/", "application/"))
 
     async def _process_attachment(
         self, part, email_log_id: int, storage_config: Optional["StorageConfig"] = None

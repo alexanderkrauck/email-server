@@ -1,6 +1,7 @@
 """FastAPI + MCP server for Email Server using FastMCP."""
 
 import asyncio
+import contextlib
 import logging
 from contextlib import asynccontextmanager
 
@@ -41,10 +42,8 @@ async def lifespan(app: FastAPI):
     # Cancel processing task
     if hasattr(app.state, "processing_task"):
         app.state.processing_task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await app.state.processing_task
-        except asyncio.CancelledError:
-            pass
 
     logger.info("Email Server shut down complete")
 
@@ -122,10 +121,8 @@ async def combined_lifespan(final_app: FastAPI):
     # Cancel processing task
     if hasattr(final_app.state, "processing_task"):
         final_app.state.processing_task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await final_app.state.processing_task
-        except asyncio.CancelledError:
-            pass
     logger.info("Email Server shut down complete")
 
 

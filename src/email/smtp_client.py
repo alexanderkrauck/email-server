@@ -1,9 +1,10 @@
 """SMTP/IMAP client for connecting to email servers."""
 
+import contextlib
 import logging
 import re
 import ssl
-from datetime import datetime
+from datetime import datetime, timezone
 from email import message_from_bytes
 from email.utils import parsedate_to_datetime
 from typing import Dict, List, Optional
@@ -76,15 +77,14 @@ class SMTPClient:
 
     BATCH_SIZE = 10
 
-    async def fetch_new_emails(self, limit: int = None):
+    async def fetch_new_emails(self, limit: Optional[int] = None):
         """Fetch new emails from all folders, yielding batches of BATCH_SIZE.
 
         Yields:
             List[Dict]: A batch of parsed email dicts.
         """
-        if not self._connected:
-            if not await self.connect():
-                return
+        if not self._connected and not await self.connect():
+            return
 
         try:
             folders = await self._get_folders()
@@ -134,7 +134,7 @@ class SMTPClient:
         logger.info("Found %s folders for %s: %s", len(folders), self.config.name, folders)
         return folders
 
-    async def _fetch_folder(self, folder: str, limit: int = None):
+    async def _fetch_folder(self, folder: str, limit: Optional[int] = None):
         """Fetch emails from a single folder, yielding batches.
 
         Yields:
@@ -205,7 +205,7 @@ class SMTPClient:
                 try:
                     email_date = parsedate_to_datetime(date_str)
                 except Exception:
-                    email_date = datetime.utcnow()
+                    email_date = datetime.now(tz=timezone.utc)
 
             # Extract body content
             body_plain = ""
@@ -259,8 +259,6 @@ class SMTPClient:
     def __del__(self):
         """Cleanup on deletion."""
         if self.client and self._connected:
-            try:
+            with contextlib.suppress(Exception):
                 # This is a sync method, so we can't await
                 self.client.close()
-            except Exception:
-                pass

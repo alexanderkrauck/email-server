@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List
 
 from src.database.connection import get_db_session
@@ -101,7 +101,7 @@ class EmailProcessor:
                 with get_db_session() as db:
                     db_config = db.query(SMTPConfig).filter(SMTPConfig.id == config_id).first()
                     if db_config:
-                        db_config.last_check = datetime.utcnow()
+                        db_config.last_check = datetime.now(tz=timezone.utc)
             except Exception as e:
                 logger.error("Error updating last_check for config %s: %s", config_id, e)
 

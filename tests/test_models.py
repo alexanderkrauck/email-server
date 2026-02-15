@@ -19,7 +19,7 @@ def test_smtp_config_creation():
 
 def test_email_data_dict():
     """Test email data structure."""
-    from datetime import datetime
+    from datetime import datetime, timezone
 
     email_dict = {
         "smtp_config_id": 1,
@@ -27,7 +27,7 @@ def test_email_data_dict():
         "recipient": "recipient@example.com",
         "subject": "Test Subject",
         "message_id": "<test@example.com>",
-        "email_date": datetime(2025, 1, 15),
+        "email_date": datetime(2025, 1, 15, tzinfo=timezone.utc),
     }
 
     assert email_dict["sender"] == "sender@example.com"

@@ -1,6 +1,6 @@
 """FastAPI handlers for email server management."""
 
-import base64
+
 import json
 import logging
 from pathlib import Path
@@ -125,15 +125,15 @@ class EmailResponse(BaseModel):
     sender: str
     recipient: str
     subject: str
-    email_date: str = None
+    email_date: str = ""
     processed_at: str
     content_size: int
     attachment_count: int
     attachments: List[AttachmentInfo] = []
-    body_plain: str = None
-    body_html: str = None
-    markdown_content: str = None
-    file_path: str = None
+    body_plain: str = ""
+    body_html: str = ""
+    markdown_content: str = ""
+    file_path: str = ""
 
     class Config:
         from_attributes = True
@@ -173,13 +173,13 @@ class SearchResult(BaseModel):
     sender: str
     recipient: str
     subject: str
-    email_date: Optional[str] = None
+    email_date: str = ""
     processed_at: str
     attachment_count: int
     attachments: List[AttachmentInfo] = []
     matched_field: str
     preview: str
-    file_path: str
+    file_path: str = ""
 
 
 # SMTP Configuration endpoints
@@ -726,14 +726,13 @@ async def get_email(email_id: int, include_content: bool = True, db: Session = D
                 size=attachment.size
             )
 
-            # For small attachments, include base64 content
-            if attachment.size <= 1024 * 100:  # 100KB limit for inline content
-                try:
-                    data = await attachment_handler.get_attachment_data(attachment)
-                    if data:
-                        attachment_info.content = base64.b64encode(data).decode('utf-8')
-                except Exception as e:
-                    logger.warning(f"Could not load attachment {attachment.id}: {e}")
+            # Include extracted text content for attachments
+            try:
+                data = await attachment_handler.get_attachment_data(attachment)
+                if data:
+                    attachment_info.content = data.decode('utf-8', errors='ignore')
+            except Exception as e:
+                logger.warning(f"Could not load attachment text {attachment.id}: {e}")
 
             attachment_infos.append(attachment_info)
 

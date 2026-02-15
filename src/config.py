@@ -1,6 +1,7 @@
 """Configuration settings for Email Server."""
 
 from pydantic_settings import BaseSettings
+from typing import List
 
 
 class Settings(BaseSettings):
@@ -29,6 +30,20 @@ class Settings(BaseSettings):
     max_attachment_size: int = 10 * 1024 * 1024  # 10MB
     inline_attachment_size: int = 1024 * 1024  # 1MB - store in DB vs filesystem
     allowed_attachment_types: list = []  # Empty means all types allowed
+
+    # Text-Only Storage (Global Settings - stronger negative)
+    store_text_only: bool = True  # If True: only store text, never binary
+    max_attachment_size_text: int = 10 * 1024 * 1024  # Max size for text extraction
+
+    # Text Extraction Settings (which types to extract text from)
+    extract_pdf_text: bool = True  # PDF -> text
+    extract_docx_text: bool = True  # DOCX -> text
+    extract_image_text: bool = False  # OCR (off by default, requires tesseract)
+    extract_other_text: bool = True  # Other text-based files (CSV, XML, JSON, RTF)
+
+    # Search Settings
+    search_index_enabled: bool = False
+    search_index_dir: str = "/app/data/search-index"
 
     # Security
     require_auth: bool = False

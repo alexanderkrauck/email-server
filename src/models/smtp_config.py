@@ -27,6 +27,15 @@ class SMTPConfig(Base):
     smtp_use_tls = Column(Boolean, default=True)
     enabled = Column(Boolean, default=True)
 
+    # Storage overrides (NULL = use global setting)
+    # Global stronger negative: if global=False, account can't override to True
+    store_text_only_override = Column(Boolean, nullable=True)
+    max_attachment_size_override = Column(Integer, nullable=True)
+    extract_pdf_text_override = Column(Boolean, nullable=True)
+    extract_docx_text_override = Column(Boolean, nullable=True)
+    extract_image_text_override = Column(Boolean, nullable=True)
+    extract_other_text_override = Column(Boolean, nullable=True)
+
     # Timestamps
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
@@ -57,7 +66,13 @@ class SMTPConfig(Base):
             'created_at': self.created_at.isoformat() if self.created_at else "",
             'updated_at': self.updated_at.isoformat() if self.updated_at else "",
             'last_check': self.last_check.isoformat() if self.last_check else "",
-            'total_emails_processed': self.total_emails_processed
+            'total_emails_processed': self.total_emails_processed,
+            'store_text_only_override': self.store_text_only_override,
+            'max_attachment_size_override': self.max_attachment_size_override,
+            'extract_pdf_text_override': self.extract_pdf_text_override,
+            'extract_docx_text_override': self.extract_docx_text_override,
+            'extract_image_text_override': self.extract_image_text_override,
+            'extract_other_text_override': self.extract_other_text_override,
         }
 
     @staticmethod
@@ -81,4 +96,10 @@ class SMTPConfig(Base):
         detached.smtp_use_ssl = config.smtp_use_ssl
         detached.smtp_use_tls = config.smtp_use_tls
         detached.enabled = config.enabled
+        detached.store_text_only_override = config.store_text_only_override
+        detached.max_attachment_size_override = config.max_attachment_size_override
+        detached.extract_pdf_text_override = config.extract_pdf_text_override
+        detached.extract_docx_text_override = config.extract_docx_text_override
+        detached.extract_image_text_override = config.extract_image_text_override
+        detached.extract_other_text_override = config.extract_other_text_override
         return detached

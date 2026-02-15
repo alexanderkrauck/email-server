@@ -81,4 +81,21 @@ def init_database():
                 db.execute(text(f"ALTER TABLE smtp_configs ADD COLUMN {column_name} {column_def}"))
                 db.commit()
 
+        storage_columns = [
+            ("store_text_only_override", "BOOLEAN NULL"),
+            ("max_attachment_size_override", "INTEGER NULL"),
+            ("extract_pdf_text_override", "BOOLEAN NULL"),
+            ("extract_docx_text_override", "BOOLEAN NULL"),
+            ("extract_image_text_override", "BOOLEAN NULL"),
+            ("extract_other_text_override", "BOOLEAN NULL"),
+        ]
+
+        for column_name, column_def in storage_columns:
+            try:
+                db.execute(text(f"SELECT {column_name} FROM smtp_configs LIMIT 1"))
+            except Exception:
+                logger.info(f"Adding {column_name} column to smtp_configs table")
+                db.execute(text(f"ALTER TABLE smtp_configs ADD COLUMN {column_name} {column_def}"))
+                db.commit()
+
     logger.info("Database initialized successfully")

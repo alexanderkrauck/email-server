@@ -29,23 +29,31 @@ class AttachmentHandler:
         attachment_dir.mkdir(parents=True, exist_ok=True)  # type: ignore[union-attr]
         logger.debug(f"Attachment directory: {attachment_dir}")
 
-    async def extract_attachments(self, raw_email: bytes, email_log_id: int, account_name: Optional[str] = None) -> List[EmailAttachment]:
+    async def extract_attachments(
+        self,
+        raw_email: bytes,
+        email_log_id: int,
+        account_name: Optional[str] = None,
+        storage_config: Optional["StorageConfig"] = None
+    ) -> List[EmailAttachment]:
         """Extract attachments from raw email and return attachment objects."""
+        if storage_config is None:
+            from src.storage_config.resolver import resolve_storage_config
+            storage_config = resolve_storage_config(None)
+        
         try:
             msg = message_from_bytes(raw_email)
             attachments = []
 
             for part in msg.walk():
-                # Skip non-attachment parts
                 if part.get_content_maintype() == 'multipart':
                     continue
 
                 content_disposition = part.get('Content-Disposition', '')
                 part.get_content_type()
 
-                # Check if it's an attachment
                 if 'attachment' in content_disposition or self._is_attachment(part):
-                    attachment = await self._process_attachment(part, email_log_id, account_name)
+                    attachment = await self._process_attachment(part, email_log_id, account_name, storage_config)
                     if attachment:
                         attachments.append(attachment)
 
@@ -72,15 +80,23 @@ class AttachmentHandler:
 
         return False
 
-    async def _process_attachment(self, part, email_log_id: int, account_name: Optional[str] = None) -> Optional[EmailAttachment]:
+    async def _process_attachment(
+        self,
+        part,
+        email_log_id: int,
+        account_name: Optional[str] = None,
+        storage_config: Optional["StorageConfig"] = None
+    ) -> Optional[EmailAttachment]:
         """Process a single attachment part."""
+        if storage_config is None:
+            from src.storage_config.resolver import resolve_storage_config
+            storage_config = resolve_storage_config(None)
+        
         try:
-            # Get attachment metadata
             filename = part.get_filename() or f"attachment_{email_log_id}_unknown"
             content_type = part.get_content_type()
             content_id = part.get('Content-ID', '').strip('<>')
 
-            # Get attachment data
             payload = part.get_payload(decode=True)
             if not payload:
                 logger.warning(f"Empty payload for attachment {filename}")
@@ -88,7 +104,6 @@ class AttachmentHandler:
 
             size = len(payload)
 
-            # Create attachment object
             attachment = EmailAttachment(
                 email_log_id=email_log_id,
                 filename=self._sanitize_filename(filename),
@@ -97,24 +112,55 @@ class AttachmentHandler:
                 size=size
             )
 
-            # Decide storage method based on size
-            if size <= 1024 * 1024:  # 1MB - store in database
-                attachment.content_data = payload  # type: ignore[assignment]
-                logger.debug(f"Storing small attachment {filename} in database")
+            from src.email.text_extractor import TextExtractor
+            text_extractor = TextExtractor()
+            
+            text_content = await text_extractor.extract(payload, content_type, storage_config)
+            
+            if text_content:
+                text_file_path = await self._save_attachment_text(
+                    text_content, filename, email_log_id, account_name
+                )
+                if text_file_path:
+                    attachment.text_file_path = str(text_file_path)
+                    logger.debug(f"Saved extracted text for {filename}")
             else:
-                # Store large attachments as files and create markdown
-                file_paths = await self._save_attachment_with_markdown(payload, filename, content_type, size, email_log_id, account_name)
-                if file_paths:
-                    attachment.file_path = str(file_paths['binary'])  # type: ignore[assignment]
-                    logger.debug(f"Stored large attachment {filename} at {file_paths['binary']} with metadata at {file_paths['markdown']}")
-                else:
-                    logger.error(f"Failed to save attachment file {filename}")
-                    return None
+                logger.debug(f"No text extracted for {filename} (type: {content_type})")
 
             return attachment
 
         except Exception as e:
             logger.error(f"Error processing attachment: {e}")
+            return None
+
+    async def _save_attachment_text(
+        self,
+        text_content: str,
+        filename: str,
+        email_log_id: int,
+        account_name: Optional[str] = None
+    ) -> Optional[Path]:
+        """Save extracted text from attachment."""
+        try:
+            if account_name:
+                account_safe = self._sanitize_filename(account_name)
+                attachment_dir = self.email_log_dir / account_safe / "emails" / "attachments"
+            else:
+                attachment_dir = self.email_log_dir / "emails" / "attachments"
+            
+            self._ensure_attachment_directory(attachment_dir)
+            
+            safe_filename = self._sanitize_filename(filename)
+            text_filename = f"{email_log_id}_{safe_filename}.txt"
+            text_path = attachment_dir / text_filename
+            
+            with open(text_path, 'w', encoding='utf-8') as f:
+                f.write(text_content)
+            
+            return text_path
+            
+        except Exception as e:
+            logger.error(f"Error saving attachment text: {e}")
             return None
 
     async def _save_attachment_file(self, data: bytes, filename: str, email_log_id: int, account_name: Optional[str] = None) -> Optional[Path]:
@@ -270,20 +316,15 @@ class AttachmentHandler:
         return sanitize_filename(filename)
 
     async def get_attachment_data(self, attachment: EmailAttachment) -> Optional[bytes]:
-        """Get attachment data from database or filesystem."""
+        """Get attachment text data from filesystem."""
         try:
-            # First try database storage
-            content = attachment.content_data  # type: ignore[return-value]
-            if content:
-                return content
-
-            # Try filesystem storage
-            file_path = attachment.file_path  # type: ignore[assignment]
-            if file_path and Path(file_path).exists():
-                with open(file_path, 'rb') as f:
+            # Try text file path (new storage model)
+            text_path = attachment.text_file_path
+            if text_path and Path(text_path).exists():
+                with open(text_path, 'rb') as f:
                     return f.read()
-
-            logger.warning(f"Attachment {attachment.id} not found in database or filesystem")
+            
+            logger.debug(f"Attachment {attachment.id} text file not found")
             return None
 
         except Exception as e:

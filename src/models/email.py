@@ -14,28 +14,18 @@ class EmailLog(Base):
     id = Column(Integer, primary_key=True)
     smtp_config_id = Column(Integer, ForeignKey("smtp_configs.id"), nullable=False)
 
-    # Email metadata
     sender = Column(String(500), nullable=False)
     recipient = Column(String(500), nullable=False)
     subject = Column(Text, nullable=True)
     message_id = Column(String(255), unique=True, nullable=False)
 
-    # Content
-    body_plain = Column(Text, nullable=True)
-    body_html = Column(Text, nullable=True)
+    log_file_path = Column(String(1000), nullable=True)
 
-    # File paths
-    log_file_path = Column(String(1000), nullable=True)  # Path to the detailed log file
-
-    # Timestamps
-    email_date = Column(DateTime, nullable=True)  # Date from email headers
+    email_date = Column(DateTime, nullable=True)
     processed_at = Column(DateTime, default=func.now())
 
-    # Size info
-    content_size = Column(Integer, default=0)  # Size in bytes
     attachment_count = Column(Integer, default=0)
 
-    # Relationships
     attachments = relationship("EmailAttachment", back_populates="email_log", cascade="all, delete-orphan")
 
     def __repr__(self):

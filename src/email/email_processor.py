@@ -103,49 +103,47 @@ class EmailProcessor:
         """Process a batch of emails."""
         from src.email.email_logger import EmailLogger
         from src.email.attachment_handler import AttachmentHandler
+        from src.email.text_extractor import TextExtractor
+        from src.storage_config.resolver import resolve_storage_config
 
         logger_instance = EmailLogger()
         attachment_handler = AttachmentHandler()
+        text_extractor = TextExtractor()
 
         for email_data in emails:
             try:
-                # Log email to database
                 with get_db_session() as db:
+                    smtp_config = db.query(SMTPConfig).filter(SMTPConfig.id == email_data["smtp_config_id"]).first()
+                    storage_config = resolve_storage_config(smtp_config)
+                    account_email = None
+                    if smtp_config:
+                        account_email = smtp_config.account_name if smtp_config.account_name else smtp_config.username
+                    
                     email_log = EmailLog(
                         smtp_config_id=email_data["smtp_config_id"],
                         sender=email_data["sender"],
                         recipient=email_data["recipient"],
                         subject=email_data["subject"],
                         message_id=email_data["message_id"],
-                        body_plain=email_data["body_plain"],
-                        body_html=email_data["body_html"],
                         email_date=email_data["email_date"],
-                        content_size=email_data["content_size"],
                         attachment_count=email_data["attachment_count"]
                     )
 
                     db.add(email_log)
-                    db.flush()  # Get the ID
+                    db.flush()
 
-                    # Get account email from SMTP config (needed for attachments and file logging)
-                    smtp_config = db.query(SMTPConfig).filter(SMTPConfig.id == email_data["smtp_config_id"]).first()
-                    account_email = smtp_config.account_name if smtp_config and smtp_config.account_name else smtp_config.username if smtp_config else None
+                    file_path = await logger_instance.log_email_to_file(email_data, email_log.id, account_email)
+                    if file_path:
+                        email_log.log_file_path = file_path
 
-                    # Process attachments if any
                     if email_data["attachment_count"] > 0 and "raw_email" in email_data:
                         attachments = await attachment_handler.extract_attachments(
-                            email_data["raw_email"], email_log.id, account_email
+                            email_data["raw_email"], email_log.id, account_email, storage_config
                         )
                         for attachment in attachments:
                             db.add(attachment)
 
-                        # Update actual attachment count
                         email_log.attachment_count = len(attachments)
-
-                    # Log email to file
-                    file_path = await logger_instance.log_email_to_file(email_data, email_log.id, account_email)
-                    if file_path:
-                        email_log.log_file_path = file_path
 
                 logger.info(f"Processed email: {email_data['sender']} -> {email_data['subject'][:50]}... ({email_data['attachment_count']} attachments)")
 

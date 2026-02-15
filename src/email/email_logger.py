@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 class EmailLogger:
-    """Handles logging email content to files in readable formats."""
+    """Handles logging email content to files in text + JSON format."""
 
     def __init__(self):
         self.log_dir = Path(settings.email_log_dir)
@@ -26,120 +26,119 @@ class EmailLogger:
         logger.info(f"Email log directory: {self.log_dir}")
 
     async def log_email_to_file(self, email_data: Dict, email_id: int, account_email: str = None) -> Optional[str]:
-        """Log email content to a markdown file, organized by email account."""
+        """Log email content to text file with metadata JSON, organized by email account."""
         try:
-            # Create account-specific directory using full email address
-            if account_email:
-                account_dir = self.log_dir / account_email
-            else:
-                # Fallback: use recipient email as account identifier
-                recipient = email_data.get("recipient", "unknown@unknown.com")
-                account_dir = self.log_dir / recipient
-
-            account_dir.mkdir(parents=True, exist_ok=True)
-
-            # Create individual email directory with meaningful ID
+            account_dir = self._get_account_directory(account_email, email_data.get("recipient"))
+            
             email_date = email_data.get("email_date", datetime.utcnow())
             if isinstance(email_date, str):
                 email_date = datetime.fromisoformat(email_date.replace('Z', '+00:00'))
-
-            timestamp = email_date.strftime("%Y%m%d_%H%M%S")
-            subject_safe = self._sanitize_filename(email_data.get("subject", "no-subject")[:50])
-            sender_safe = self._sanitize_filename(email_data.get("sender", "unknown")[:20])
-
-            # Create unique directory name based on timestamp, subject, and sender
-            email_dir_name = f"{timestamp}_{subject_safe}_{sender_safe}"
-            email_dir = account_dir / email_dir_name
+            
+            year_month = email_date.strftime("%Y-%m")
+            email_dir = account_dir / "emails" / year_month
             email_dir.mkdir(parents=True, exist_ok=True)
-
-            # Create email filename
-            filename = f"{timestamp}_{subject_safe}.md"
-            file_path = email_dir / filename
-
-            # Convert to markdown and save
-            markdown_content = self.markdown_converter.convert_email_to_markdown(email_data)
-            await self._write_markdown_file(file_path, markdown_content)
-
-            logger.debug(f"Email logged to: {file_path}")
-            return str(file_path)
+            
+            timestamp = email_date.strftime("%Y%m%d_%H%M%S")
+            
+            text_path = email_dir / f"{timestamp}_{email_id}.txt"
+            meta_path = email_dir / f"{timestamp}_{email_id}.meta.json"
+            
+            await self._write_text_file(text_path, email_data, email_id)
+            await self._write_meta_file(meta_path, email_data, email_id, account_email)
+            
+            logger.debug(f"Email logged to: {text_path}")
+            return str(text_path)
 
         except Exception as e:
             logger.error(f"Error logging email to file: {e}")
             return None
 
-    async def _write_markdown_file(self, file_path: Path, markdown_content: str):
-        """Write markdown content to file."""
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(markdown_content)
+    def _get_account_directory(self, account_email: Optional[str], recipient: str) -> Path:
+        """Get account-specific directory."""
+        if account_email:
+            return self.log_dir / account_email
+        return self.log_dir / (recipient or "unknown@unknown.com")
 
-    async def _write_json_log(self, file_path: Path, email_data: Dict, email_id: int):
-        """Write email data in JSON format."""
-        log_data = {
-            "email_id": email_id,
-            "timestamp": datetime.utcnow().isoformat(),
-            "smtp_config_id": email_data.get("smtp_config_id"),
+    async def _write_text_file(self, file_path: Path, email_data: Dict, email_id: int):
+        """Write email content as plain text."""
+        text_extractor = TextExtractor()
+        from src.storage_config.resolver import resolve_storage_config
+        config = resolve_storage_config()
+        
+        body_text = email_data.get("body_plain", "")
+        
+        if not body_text and email_data.get("body_html"):
+            body_text = await text_extractor._extract_html(
+                email_data["body_html"].encode('utf-8')
+            )
+        
+        content = []
+        content.append(f"From: {email_data.get('sender', '')}")
+        content.append(f"To: {email_data.get('recipient', '')}")
+        content.append(f"Subject: {email_data.get('subject', '')}")
+        content.append(f"Date: {email_data.get('email_date', '')}")
+        content.append(f"Message-ID: {email_data.get('message_id', '')}")
+        content.append("")
+        content.append(body_text or "")
+        
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(content))
+
+    async def _write_meta_file(self, file_path: Path, email_data: Dict, email_id: int, account_email: str):
+        """Write email metadata as JSON."""
+        email_date = email_data.get("email_date")
+        meta = {
+            "id": email_id,
+            "account": account_email,
             "sender": email_data.get("sender", ""),
             "recipient": email_data.get("recipient", ""),
             "subject": email_data.get("subject", ""),
             "message_id": email_data.get("message_id", ""),
-            "email_date": email_data.get("email_date").isoformat() if email_data.get("email_date") else None,
-            "content_size": email_data.get("content_size", 0),
+            "email_date": email_date.isoformat() if email_date else None,
+            "processed_at": datetime.utcnow().isoformat(),
             "attachment_count": email_data.get("attachment_count", 0),
-            "body": {
-                "plain": email_data.get("body_plain", ""),
-                "html": email_data.get("body_html", "")
-            }
         }
-
-        # Write JSON file
+        
         with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump(log_data, f, indent=2, ensure_ascii=False, default=str)
+            json.dump(meta, f, indent=2, ensure_ascii=False)
 
-    async def _write_text_log(self, file_path: Path, email_data: Dict, email_id: int):
-        """Write email data in human-readable text format."""
-        content = []
-        content.append("=" * 80)
-        content.append(f"Email ID: {email_id}")
-        content.append(f"Processed: {datetime.utcnow().isoformat()}")
-        content.append(f"SMTP Config ID: {email_data.get('smtp_config_id')}")
-        content.append("=" * 80)
-        content.append(f"From: {email_data.get('sender', '')}")
-        content.append(f"To: {email_data.get('recipient', '')}")
-        content.append(f"Subject: {email_data.get('subject', '')}")
-        content.append(f"Message ID: {email_data.get('message_id', '')}")
+    async def log_attachment_text(self, email_id: int, account_email: str, attachment_data: Dict, text_content: str) -> Optional[str]:
+        """Log extracted text from attachment."""
+        try:
+            account_dir = self._get_account_directory(account_email, None)
+            attachments_dir = account_dir / "emails" / "attachments"
+            attachments_dir.mkdir(parents=True, exist_ok=True)
+            
+            safe_filename = self._sanitize_filename(attachment_data.get("filename", "attachment"))
+            text_path = attachments_dir / f"{email_id}_{safe_filename}.txt"
+            
+            with open(text_path, 'w', encoding='utf-8') as f:
+                f.write(text_content)
+            
+            return str(text_path)
+            
+        except Exception as e:
+            logger.error(f"Error logging attachment text: {e}")
+            return None
 
-        email_date = email_data.get("email_date")
-        if email_date:
-            content.append(f"Date: {email_date.isoformat()}")
-
-        content.append(f"Content Size: {email_data.get('content_size', 0)} bytes")
-        content.append(f"Attachments: {email_data.get('attachment_count', 0)}")
-        content.append("-" * 80)
-
-        # Plain text body
-        body_plain = email_data.get("body_plain", "")
-        if body_plain:
-            content.append("PLAIN TEXT BODY:")
-            content.append(body_plain)
-            content.append("-" * 80)
-
-        # HTML body
-        body_html = email_data.get("body_html", "")
-        if body_html:
-            content.append("HTML BODY:")
-            content.append(body_html)
-            content.append("-" * 80)
-
-        content.append("")  # End with empty line
-
-        # Write text file
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write('\n'.join(content))
+    def get_attachment_text_path(self, email_id: int, account_email: str, filename: str) -> Optional[Path]:
+        """Get path to attachment text file."""
+        account_dir = self._get_account_directory(account_email, None)
+        safe_filename = self._sanitize_filename(filename)
+        text_path = account_dir / "emails" / "attachments" / f"{email_id}_{safe_filename}.txt"
+        
+        if text_path.exists():
+            return text_path
+        return None
 
     def _sanitize_filename(self, filename: str) -> str:
-        """Sanitize filename by removing invalid characters, spaces, and encoding issues."""
-        from src.email import sanitize_filename
-        return sanitize_filename(filename)
+        """Sanitize filename by removing invalid characters."""
+        if not filename:
+            return "unnamed"
+        invalid_chars = '<>:"/\\|?*'
+        for char in invalid_chars:
+            filename = filename.replace(char, '_')
+        return filename[:200]
 
     async def log_raw_email(self, raw_email: bytes, email_id: int, sender: str) -> Optional[str]:
         """Log raw email bytes to file for debugging."""
@@ -163,7 +162,7 @@ class EmailLogger:
         """Get list of recent log files."""
         try:
             files = []
-            for file_path in self.log_dir.iterdir():
+            for file_path in self.log_dir.rglob("*.txt"):
                 if file_path.is_file():
                     files.append({
                         "name": file_path.name,
@@ -172,7 +171,6 @@ class EmailLogger:
                         "modified": datetime.fromtimestamp(file_path.stat().st_mtime).isoformat()
                     })
 
-            # Sort by modification time, newest first
             files.sort(key=lambda x: x["modified"], reverse=True)
             return files[:limit]
 
@@ -186,7 +184,7 @@ class EmailLogger:
             cutoff_time = datetime.utcnow().timestamp() - (days_old * 24 * 3600)
             deleted_count = 0
 
-            for file_path in self.log_dir.iterdir():
+            for file_path in self.log_dir.rglob("*.txt"):
                 if file_path.is_file() and file_path.stat().st_mtime < cutoff_time:
                     file_path.unlink()
                     deleted_count += 1

@@ -104,14 +104,22 @@ class AttachmentHandler:
 
             size = len(payload)
 
+            # Save binary attachment file first
+            file_path = await self._save_attachment_file(payload, filename, email_log_id, account_name)
+            if not file_path:
+                logger.warning(f"Failed to save attachment file for {filename}")
+                return None
+
             attachment = EmailAttachment(
                 email_log_id=email_log_id,
                 filename=self._sanitize_filename(filename),
                 content_type=content_type,
                 content_id=content_id,
-                size=size
+                size=size,
+                file_path=str(file_path)
             )
 
+            # Extract text from the saved file
             from src.email.text_extractor import TextExtractor
             text_extractor = TextExtractor()
             
@@ -123,7 +131,7 @@ class AttachmentHandler:
                 )
                 if text_file_path:
                     attachment.text_file_path = str(text_file_path)
-                    logger.debug(f"Saved extracted text for {filename}")
+                    logger.info(f"Saved extracted text for {filename} -> {text_file_path}")
             else:
                 logger.debug(f"No text extracted for {filename} (type: {content_type})")
 

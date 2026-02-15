@@ -38,11 +38,11 @@ class Settings(BaseSettings):
     max_attachment_size_text: int = 10 * 1024 * 1024  # Max size for text extraction
 
     # Text Extraction Settings (which types to extract text from)
-    # Set to False to allow accounts to enable individually
-    extract_pdf_text: bool = False  # Allow accounts to enable PDF -> text
-    extract_docx_text: bool = False  # Allow accounts to enable DOCX -> text
-    extract_image_text: bool = False  # OCR (off by default)
-    extract_other_text: bool = False  # Allow accounts to enable other text extraction
+    # Set to True to allow accounts to enable individually (account can disable by setting to False)
+    extract_pdf_text: bool = True  # Allow accounts to enable PDF -> text
+    extract_docx_text: bool = True  # Allow accounts to enable DOCX -> text
+    extract_image_text: bool = True  # OCR (off by default, accounts can enable)
+    extract_other_text: bool = True  # Allow accounts to enable other text extraction
 
     # Search Settings
     search_index_enabled: bool = False

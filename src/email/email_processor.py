@@ -59,15 +59,15 @@ class EmailProcessor:
             # Create detached config copies to avoid session issues
             config_copies = [SMTPConfig.create_detached(config) for config in configs]
 
-        # Process each server with detached config copies
+        # Process each server with detached config copies (in parallel)
         tasks = []
         for config_copy in config_copies:
             task = asyncio.create_task(self._process_server(config_copy))
             tasks.append(task)
 
-            # Wait for all servers to complete
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
+        # Wait for all servers to complete (outside the loop for parallel processing)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _process_server(self, config: SMTPConfig):
         """Process emails from a single server."""

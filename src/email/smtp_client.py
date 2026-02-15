@@ -116,10 +116,26 @@ class SMTPClient:
                 # Fallback to INBOX if no folders found
                 folders = ["INBOX"]
 
+            # Filter folders for Gmail to avoid throttling
+            if "gmail.com" in self.config.host.lower():
+                # Only sync essential folders, skip [Google Mail]/All Mail and other special folders
+                essential_folders = ["INBOX", "[Google Mail]/Sent Mail", "Gesendet", "Sent"]
+                filtered_folders = [f for f in folders if f in essential_folders]
+                if filtered_folders:
+                    folders = filtered_folders
+                    logger.info(f"Filtered to essential Gmail folders: {folders}")
+                else:
+                    # Fallback to INBOX only
+                    folders = ["INBOX"]
+
             logger.info(f"Found {len(folders)} folders for {self.config.name}: {folders}")
 
             all_emails = []
             for folder in folders:
+                # Skip \Noselect folders (Gmail special folders that can't be selected)
+                if folder.startswith('[Google Mail]') and folder != '[Google Mail]/Sent Mail':
+                    logger.debug(f"Skipping non-selectable Gmail folder: {folder}")
+                    continue
                 try:
                     # Select the folder
                     select_response = await self.client.select(f'"{folder}"')

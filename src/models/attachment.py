@@ -19,7 +19,8 @@ class EmailAttachment(Base):
     content_id = Column(String(255), nullable=True)
     size = Column(Integer, default=0)
 
-    text_file_path = Column(String(1000), nullable=True)
+    file_path = Column(String(1000), nullable=True)  # Path to saved binary attachment
+    text_file_path = Column(String(1000), nullable=True)  # Path to extracted text
 
     created_at = Column(DateTime, default=func.now())
 

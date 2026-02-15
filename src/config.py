@@ -31,15 +31,18 @@ class Settings(BaseSettings):
     inline_attachment_size: int = 1024 * 1024  # 1MB - store in DB vs filesystem
     allowed_attachment_types: list = []  # Empty means all types allowed
 
-    # Text-Only Storage (Global Settings - stronger negative)
-    store_text_only: bool = True  # If True: only store text, never binary
+    # Text-Only Storage (Global Settings - permissive defaults)
+    # Global stronger negative: if global=False, account CANNOT enable it
+    # Set all to False to allow accounts to configure as they wish
+    store_text_only: bool = False  # Allow accounts to enable text-only storage
     max_attachment_size_text: int = 10 * 1024 * 1024  # Max size for text extraction
 
     # Text Extraction Settings (which types to extract text from)
-    extract_pdf_text: bool = True  # PDF -> text
-    extract_docx_text: bool = True  # DOCX -> text
-    extract_image_text: bool = False  # OCR (off by default, requires tesseract)
-    extract_other_text: bool = True  # Other text-based files (CSV, XML, JSON, RTF)
+    # Set to False to allow accounts to enable individually
+    extract_pdf_text: bool = False  # Allow accounts to enable PDF -> text
+    extract_docx_text: bool = False  # Allow accounts to enable DOCX -> text
+    extract_image_text: bool = False  # OCR (off by default)
+    extract_other_text: bool = False  # Allow accounts to enable other text extraction
 
     # Search Settings
     search_index_enabled: bool = False

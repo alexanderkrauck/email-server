@@ -4,9 +4,10 @@ FROM python:3.11-alpine
 # Install system dependencies
 # - ripgrep: for regex search
 # - tesseract-ocr: for image text extraction (OCR)
+# - tesseract-ocr-data-eng: English language data for OCR
 # - leptonica: image processing library for OCR
+# - py3-pillow: for image handling
 # - gcc, musl-dev, libffi-dev, etc.: build dependencies for Python packages
-# - pillow dependencies: for image handling
 RUN apk add --no-cache \
     gcc \
     musl-dev \
@@ -16,9 +17,9 @@ RUN apk add --no-cache \
     curl \
     ripgrep \
     tesseract-ocr \
+    tesseract-ocr-data-eng \
     leptonica \
-    tesseract-ocr-eng \
-    pillow \
+    py3-pillow \
     && rm -rf /var/cache/apk/*
 
 # Set working directory

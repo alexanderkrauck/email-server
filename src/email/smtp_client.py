@@ -83,115 +83,118 @@ class SMTPClient:
             except Exception as e:
                 logger.error(f"Error disconnecting from {self.config.name}: {e}")
 
-    async def fetch_new_emails(self, limit: int = None) -> List[Dict]:
-        """Fetch new emails from all folders on the server."""
+    BATCH_SIZE = 10
+
+    async def fetch_new_emails(self, limit: int = None):
+        """Fetch new emails from all folders, yielding batches of BATCH_SIZE.
+
+        Yields:
+            List[Dict]: A batch of parsed email dicts.
+        """
         if not self._connected:
             if not await self.connect():
-                return []
+                return
 
         try:
-            # Get list of all folders
-            list_response = await self.client.list('""', '*')
-            if list_response.result != "OK":
-                logger.warning(f"Failed to list folders for {self.config.name}")
-                return []
-
-            # Parse folder names from the response
-            folders = []
-            for line in list_response.lines:
-                # Parse IMAP LIST response format
-                # Example: (\HasNoChildren) "/" "INBOX"
-                # or: (\HasNoChildren) "." "INBOX.Sent"
-                decoded = line.decode('utf-8', errors='ignore')
-                # Extract folder name - it's usually the last quoted string
-                matches = re.findall(r'"([^"]+)"', decoded)
-                if matches and len(matches) >= 2:
-                    # The last match is usually the folder name
-                    folder_name = matches[-1]
-                    # Skip hierarchy delimiters returned as folders
-                    if folder_name not in ['.', '/', '\\']:
-                        folders.append(folder_name)
-
+            folders = await self._get_folders()
             if not folders:
-                # Fallback to INBOX if no folders found
-                folders = ["INBOX"]
+                return
 
-            # Filter folders for Gmail to avoid throttling
-            if "gmail.com" in self.config.host.lower():
-                # Only sync essential folders, skip [Google Mail]/All Mail and other special folders
-                essential_folders = ["INBOX", "[Google Mail]/Sent Mail", "Gesendet", "Sent"]
-                filtered_folders = [f for f in folders if f in essential_folders]
-                if filtered_folders:
-                    folders = filtered_folders
-                    logger.info(f"Filtered to essential Gmail folders: {folders}")
-                else:
-                    # Fallback to INBOX only
-                    folders = ["INBOX"]
-
-            logger.info(f"Found {len(folders)} folders for {self.config.name}: {folders}")
-
-            all_emails = []
             for folder in folders:
-                # Skip \Noselect folders (Gmail special folders that can't be selected)
-                if folder.startswith('[Google Mail]') and folder != '[Google Mail]/Sent Mail':
-                    logger.debug(f"Skipping non-selectable Gmail folder: {folder}")
-                    continue
                 try:
-                    # Select the folder
-                    select_response = await self.client.select(f'"{folder}"')
-                    if select_response.result != "OK":
-                        logger.debug(f"Cannot select folder {folder} for {self.config.name}, skipping")
-                        continue
-
-                    # Search for all emails in this folder
-                    search_response = await self.client.search("ALL")
-                    if search_response.result != "OK":
-                        logger.warning(f"Search failed in folder {folder} for {self.config.name}")
-                        continue
-
-                    # Get message UIDs
-                    message_ids = search_response.lines[0].decode().split()
-                    if not message_ids:
-                        logger.debug(f"No emails found in folder {folder} for {self.config.name}")
-                        continue
-
-                    # Limit the number of emails to process per folder (if limit specified)
-                    if limit and len(message_ids) > limit:
-                        message_ids = message_ids[-limit:]
-
-                    folder_emails = []
-                    for msg_id in message_ids:
-                        try:
-                            # Fetch email
-                            fetch_response = await self.client.fetch(msg_id, "(RFC822)")
-                            if fetch_response.result == "OK":
-                                raw_email = fetch_response.lines[1]
-                                email_data = await self._parse_email(raw_email, msg_id)
-                                if email_data:
-                                    folder_emails.append(email_data)
-
-                                # Don't mark as seen - preserve original read status
-                            else:
-                                logger.warning(f"Failed to fetch message {msg_id} from folder {folder} in {self.config.name}")
-
-                        except Exception as e:
-                            logger.error(f"Error processing message {msg_id} from folder {folder} in {self.config.name}: {e}")
-                            continue
-
-                    if folder_emails:
-                        logger.info(f"Fetched {len(folder_emails)} emails from folder {folder} in {self.config.name}")
-                        all_emails.extend(folder_emails)
-
+                    async for batch in self._fetch_folder(folder, limit):
+                        yield batch
                 except Exception as e:
                     logger.error(f"Error processing folder {folder} for {self.config.name}: {e}")
                     continue
 
-            logger.info(f"Total fetched {len(all_emails)} emails from all folders in {self.config.name}")
-            return all_emails
-
         except Exception as e:
             logger.error(f"Error fetching emails from {self.config.name}: {e}")
+
+    async def _get_folders(self) -> List[str]:
+        """Get list of folders to sync."""
+        list_response = await self.client.list('""', '*')
+        if list_response.result != "OK":
+            logger.warning(f"Failed to list folders for {self.config.name}")
             return []
+
+        folders = []
+        for line in list_response.lines:
+            decoded = line.decode('utf-8', errors='ignore')
+            matches = re.findall(r'"([^"]+)"', decoded)
+            if matches and len(matches) >= 2:
+                folder_name = matches[-1]
+                if folder_name not in ['.', '/', '\\']:
+                    folders.append(folder_name)
+
+        if not folders:
+            folders = ["INBOX"]
+
+        # For Gmail, sync All Mail which contains everything in one folder
+        if "gmail.com" in self.config.host.lower():
+            all_mail_folders = [f for f in folders if "All Mail" in f or "Alle Nachrichten" in f]
+            if all_mail_folders:
+                folders = all_mail_folders
+                logger.info(f"Using Gmail All Mail folder: {folders}")
+            else:
+                folders = ["INBOX"]
+                logger.warning(f"Gmail All Mail folder not found, falling back to INBOX")
+
+        logger.info(f"Found {len(folders)} folders for {self.config.name}: {folders}")
+        return folders
+
+    async def _fetch_folder(self, folder: str, limit: int = None):
+        """Fetch emails from a single folder, yielding batches.
+
+        Yields:
+            List[Dict]: A batch of parsed email dicts.
+        """
+        select_response = await self.client.select(f'"{folder}"')
+        if select_response.result != "OK":
+            logger.debug(f"Cannot select folder {folder} for {self.config.name}, skipping")
+            return
+
+        search_response = await self.client.search("ALL")
+        if search_response.result != "OK":
+            logger.warning(f"Search failed in folder {folder} for {self.config.name}")
+            return
+
+        message_ids = search_response.lines[0].decode().split()
+        if not message_ids:
+            logger.debug(f"No emails found in folder {folder} for {self.config.name}")
+            return
+
+        total = len(message_ids)
+        logger.info(f"Found {total} emails in folder {folder} for {self.config.name}")
+
+        if limit and total > limit:
+            message_ids = message_ids[-limit:]
+
+        batch = []
+        for i, msg_id in enumerate(message_ids):
+            try:
+                fetch_response = await self.client.fetch(msg_id, "(RFC822)")
+                if fetch_response.result == "OK":
+                    raw_email = fetch_response.lines[1]
+                    email_data = await self._parse_email(raw_email, msg_id)
+                    if email_data:
+                        batch.append(email_data)
+                else:
+                    logger.warning(f"Failed to fetch message {msg_id} from {folder} in {self.config.name}")
+            except Exception as e:
+                logger.error(f"Error fetching message {msg_id} from {folder} in {self.config.name}: {e}")
+                continue
+
+            # Yield batch when full
+            if len(batch) >= self.BATCH_SIZE:
+                logger.info(f"Progress: {i + 1}/{total} fetched from {folder} in {self.config.name}")
+                yield batch
+                batch = []
+
+        # Yield remaining
+        if batch:
+            logger.info(f"Progress: {i + 1}/{total} fetched from {folder} in {self.config.name}")
+            yield batch
 
     async def _parse_email(self, raw_email: bytes, uid: str) -> Optional[Dict]:
         """Parse raw email data into structured format."""

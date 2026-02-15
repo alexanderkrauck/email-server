@@ -83,12 +83,14 @@ class EmailProcessor:
 
             client = self.active_clients[client_key]
 
-            # Fetch new emails
-            emails = await client.fetch_new_emails()
+            # Fetch and process emails in batches
+            total_processed = 0
+            async for batch in client.fetch_new_emails():
+                await self._process_emails(batch)
+                total_processed += len(batch)
 
-            if emails:
-                await self._process_emails(emails)
-                await self._update_server_stats(config, len(emails))
+            if total_processed:
+                await self._update_server_stats(config, total_processed)
 
             # Update last check time
             with get_db_session() as db:

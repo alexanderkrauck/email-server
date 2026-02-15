@@ -48,6 +48,15 @@ class SMTPConfigCreate(BaseModel):
     smtp_use_ssl: bool = False
     smtp_use_tls: bool = True
     enabled: bool = True
+    
+    # Storage overrides (NULL = use global setting)
+    # Set to True to enable, False to explicitly disable, leave None to use global
+    store_text_only_override: Optional[bool] = None
+    max_attachment_size_override: Optional[int] = None
+    extract_pdf_text_override: Optional[bool] = None
+    extract_docx_text_override: Optional[bool] = None
+    extract_image_text_override: Optional[bool] = None
+    extract_other_text_override: Optional[bool] = None
 
 
 class SMTPConfigUpdate(BaseModel):
@@ -64,6 +73,14 @@ class SMTPConfigUpdate(BaseModel):
     smtp_use_ssl: bool = None
     smtp_use_tls: bool = None
     enabled: bool = None
+    
+    # Storage overrides
+    store_text_only_override: Optional[bool] = None
+    max_attachment_size_override: Optional[int] = None
+    extract_pdf_text_override: Optional[bool] = None
+    extract_docx_text_override: Optional[bool] = None
+    extract_image_text_override: Optional[bool] = None
+    extract_other_text_override: Optional[bool] = None
 
 
 class SMTPConfigResponse(BaseModel):
@@ -83,6 +100,14 @@ class SMTPConfigResponse(BaseModel):
     created_at: str
     last_check: Optional[str] = None
     total_emails_processed: int
+    
+    # Storage override settings
+    store_text_only_override: Optional[bool] = None
+    max_attachment_size_override: Optional[int] = None
+    extract_pdf_text_override: Optional[bool] = None
+    extract_docx_text_override: Optional[bool] = None
+    extract_image_text_override: Optional[bool] = None
+    extract_other_text_override: Optional[bool] = None
 
     class Config:
         from_attributes = True
@@ -188,7 +213,76 @@ async def list_smtp_configs(db: Session = Depends(get_db)):
 
 @router.post("/smtp-configs", response_model=SMTPConfigResponse)
 async def create_smtp_config(config_data: SMTPConfigCreate, db: Session = Depends(get_db)):
-    """Create a new SMTP configuration."""
+    """
+    Create a new SMTP/IMAP account configuration.
+    
+    ## Storage Configuration
+    
+    The account can override global storage settings. Set to:
+    - `true` to enable
+    - `false` to explicitly disable  
+    - `null` (or omit) to use global default
+    
+    **Global stronger negative rule**: If global setting is disabled (false), 
+    account cannot enable it. If global is enabled, account can disable.
+    
+    ### Storage Override Fields
+    
+    - **store_text_only_override**: Store only text content, no binary
+      - Set true to only store .txt files (no attachment binaries)
+      - Global default: false (allows accounts to enable)
+    
+    - **max_attachment_size_override**: Max size for text extraction (bytes)
+      - Only applies if extraction is enabled
+      - Global default: 10MB
+    
+    - **extract_pdf_text_override**: Extract text from PDF attachments
+      - Global default: false (allows accounts to enable)
+    
+    - **extract_docx_text_override**: Extract text from DOCX/DOC attachments
+      - Global default: false (allows accounts to enable)
+    
+    - **extract_image_text_override**: Extract text from images via OCR
+      - Requires tesseract-ocr installed
+      - Global default: false (slower, off by default)
+    
+    - **extract_other_text_override**: Extract text from CSV, JSON, XML, RTF
+      - Global default: false (allows accounts to enable)
+    
+    ## Example: Enable Full Text Storage for Account
+    
+    To enable text-only storage with PDF/DOCX extraction for a new account:
+    
+    ```python
+    create_smtp_config(
+        name="work-email",
+        account_name="me@company.com",
+        host="imap.company.com",
+        port=993,
+        username="me@company.com",
+        password="app-password",
+        store_text_only_override=True,
+        extract_pdf_text_override=True,
+        extract_docx_text_override=True,
+        extract_other_text_override=True
+    )
+    ```
+    
+    ## Example: Keep Default (Use Global Settings)
+    
+    Omit storage fields to use global defaults:
+    
+    ```python
+    create_smtp_config(
+        name="personal-email",
+        host="imap.gmail.com",
+        port=993,
+        username="me@gmail.com",
+        password="app-password"
+    )
+    # This account will use global settings
+    ```
+    """
     # Check if name already exists
     existing = db.query(SMTPConfig).filter(SMTPConfig.name == config_data.name).first()
     if existing:

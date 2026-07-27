@@ -23,6 +23,8 @@ class SMTPClient:
         self.config = smtp_config
         self.client = None
         self._connected = False
+        self._last_uids: Dict[str, int] = {}
+        self._uid_validities: Dict[str, int] = {}
 
     async def connect(self) -> bool:
         """Connect to the IMAP server."""
@@ -58,56 +60,82 @@ class SMTPClient:
                 self._connected = True
                 logger.info("Successfully connected to %s (%s)", self.config.name, self.config.host)
                 return True
-            logger.error("Login failed for %s: %s - %s", self.config.name, login_response.result, login_response.data)
+            logger.error(
+                "Login failed for %s: %s - %s",
+                self.config.name,
+                login_response.result,
+                getattr(login_response, "lines", []),
+            )
+            await self.disconnect()
             return False
 
         except Exception as e:
-            logger.error("Connection failed for %s: %s: %s", self.config.name, type(e).__name__, e)
+            logger.error("Connection failed for %s: %s: %r", self.config.name, type(e).__name__, e)
+            await self.disconnect()
             return False
 
     async def disconnect(self):
         """Disconnect from the IMAP server."""
+        client = self.client
+        self.client = None
+        self._connected = False
+        if client:
+            with contextlib.suppress(Exception):
+                await client.logout()
+            logger.info("Disconnected from %s", self.config.name)
+
+    async def _ensure_connected(self) -> bool:
+        """Reconnect when a server has closed a cached IMAP connection."""
         if self.client and self._connected:
             try:
-                await self.client.logout()
-                self._connected = False
-                logger.info("Disconnected from %s", self.config.name)
+                response = await self.client.noop()
+                if response.result == "OK":
+                    return True
+                logger.warning("IMAP NOOP failed for %s: %s", self.config.name, response.result)
             except Exception as e:
-                logger.error("Error disconnecting from %s: %s", self.config.name, e)
+                logger.warning("Cached IMAP connection is stale for %s: %s: %r", self.config.name, type(e).__name__, e)
+            await self.disconnect()
+
+        return await self.connect()
 
     BATCH_SIZE = 10
 
-    async def fetch_new_emails(self, limit: Optional[int] = None):
+    async def fetch_new_emails(self, limit: Optional[int] = None, since: Optional[datetime] = None):
         """Fetch new emails from all folders, yielding batches of BATCH_SIZE.
 
         Yields:
             List[Dict]: A batch of parsed email dicts.
         """
-        if not self._connected and not await self.connect():
-            return
+        if not await self._ensure_connected():
+            raise ConnectionError(f"Could not connect to {self.config.name}")
 
         try:
             folders = await self._get_folders()
-            if not folders:
-                return
 
             for folder in folders:
                 try:
-                    async for batch in self._fetch_folder(folder, limit):
+                    async for batch in self._fetch_folder(folder, limit, since):
                         yield batch
                 except Exception as e:
-                    logger.error("Error processing folder %s for %s: %s", folder, self.config.name, e)
-                    continue
+                    logger.error(
+                        "Error processing folder %s for %s: %s: %r",
+                        folder,
+                        self.config.name,
+                        type(e).__name__,
+                        e,
+                    )
+                    raise
 
         except Exception as e:
-            logger.error("Error fetching emails from %s: %s", self.config.name, e)
+            await self.disconnect()
+            logger.error("Error fetching emails from %s: %s: %r", self.config.name, type(e).__name__, e)
+            raise
 
     async def _get_folders(self) -> List[str]:
         """Get list of folders to sync."""
         list_response = await self.client.list('""', "*")
         if list_response.result != "OK":
-            logger.warning("Failed to list folders for %s", self.config.name)
-            return []
+            raise RuntimeError(f"Failed to list folders for {self.config.name}: {list_response.result}")
 
         folders = []
         for line in list_response.lines:
@@ -134,7 +162,9 @@ class SMTPClient:
         logger.info("Found %s folders for %s: %s", len(folders), self.config.name, folders)
         return folders
 
-    async def _fetch_folder(self, folder: str, limit: Optional[int] = None):
+    async def _fetch_folder(
+        self, folder: str, limit: Optional[int] = None, since: Optional[datetime] = None
+    ):
         """Fetch emails from a single folder, yielding batches.
 
         Yields:
@@ -142,39 +172,80 @@ class SMTPClient:
         """
         select_response = await self.client.select(f'"{folder}"')
         if select_response.result != "OK":
-            logger.debug("Cannot select folder %s for %s, skipping", folder, self.config.name)
+            raise RuntimeError(f"Cannot select folder {folder} for {self.config.name}")
+
+        uid_validity = self._extract_uid_validity(select_response.lines)
+        previous_uid_validity = self._uid_validities.get(folder)
+        if previous_uid_validity and uid_validity and previous_uid_validity != uid_validity:
+            logger.warning("UIDVALIDITY changed for %s in %s; resetting checkpoint", folder, self.config.name)
+            self._last_uids.pop(folder, None)
+        if uid_validity:
+            self._uid_validities[folder] = uid_validity
+
+        last_uid = self._last_uids.get(folder)
+        uid_next = self._extract_uid_next(select_response.lines)
+        if last_uid is not None and uid_next is not None and last_uid >= uid_next - 1:
+            logger.debug("No new UIDs in folder %s for %s", folder, self.config.name)
             return
 
-        search_response = await self.client.search("ALL")
+        if last_uid is not None:
+            search_criteria = ("UID", f"{last_uid + 1}:*")
+        elif since is not None:
+            search_criteria = ("SINCE", self._format_imap_date(since))
+        else:
+            search_criteria = ("ALL",)
+
+        search_response = await self.client.search(*search_criteria)
         if search_response.result != "OK":
-            logger.warning("Search failed in folder %s for %s", folder, self.config.name)
-            return
+            raise RuntimeError(f"Search failed in folder {folder} for {self.config.name}")
 
         message_ids = search_response.lines[0].decode().split()
         if not message_ids:
             logger.debug("No emails found in folder %s for %s", folder, self.config.name)
             return
 
-        total = len(message_ids)
-        logger.info("Found %s emails in folder %s for %s", total, folder, self.config.name)
-
-        if limit and total > limit:
+        if limit and len(message_ids) > limit:
             message_ids = message_ids[-limit:]
 
+        total = len(message_ids)
+        logger.info(
+            "Found %s emails in folder %s for %s using %s",
+            total,
+            folder,
+            self.config.name,
+            " ".join(search_criteria),
+        )
+
         batch = []
+        highest_uid = last_uid
         for i, msg_id in enumerate(message_ids):
             try:
-                fetch_response = await self.client.fetch(msg_id, "(RFC822)")
+                fetch_response = await self.client.fetch(msg_id, "(UID RFC822)")
                 if fetch_response.result == "OK":
                     raw_email = fetch_response.lines[1]
-                    email_data = await self._parse_email(raw_email, msg_id)
+                    message_uid = self._extract_message_uid(fetch_response.lines)
+                    if last_uid is not None and message_uid is not None and message_uid <= last_uid:
+                        logger.debug("Ignoring replayed UID %s in %s", message_uid, folder)
+                        continue
+                    email_data = await self._parse_email(raw_email, str(message_uid or msg_id))
                     if email_data:
                         batch.append(email_data)
+                    if message_uid is not None:
+                        highest_uid = max(highest_uid or 0, message_uid)
                 else:
-                    logger.warning("Failed to fetch message %s from %s in %s", msg_id, folder, self.config.name)
+                    raise RuntimeError(
+                        f"Failed to fetch message {msg_id} from {folder} in {self.config.name}"
+                    )
             except Exception as e:
-                logger.error("Error fetching message %s from %s in %s: %s", msg_id, folder, self.config.name, e)
-                continue
+                logger.error(
+                    "Error fetching message %s from %s in %s: %s: %r",
+                    msg_id,
+                    folder,
+                    self.config.name,
+                    type(e).__name__,
+                    e,
+                )
+                raise
 
             # Yield batch when full
             if len(batch) >= self.BATCH_SIZE:
@@ -186,6 +257,46 @@ class SMTPClient:
         if batch:
             logger.info("Progress: %s/%s fetched from %s in %s", i + 1, total, folder, self.config.name)
             yield batch
+
+        if highest_uid is not None:
+            self._last_uids[folder] = highest_uid
+
+    @staticmethod
+    def _format_imap_date(value: datetime) -> str:
+        """Format a date for an IMAP SEARCH command."""
+        if value.tzinfo is not None:
+            value = value.astimezone(timezone.utc)
+        return value.strftime("%d-%b-%Y")
+
+    @staticmethod
+    def _extract_message_uid(lines) -> Optional[int]:
+        """Extract the stable UID returned with FETCH metadata."""
+        for line in lines:
+            if isinstance(line, bytes):
+                match = re.search(rb"\bUID\s+(\d+)\b", line)
+                if match:
+                    return int(match.group(1))
+        return None
+
+    @staticmethod
+    def _extract_uid_validity(lines) -> Optional[int]:
+        """Extract UIDVALIDITY from a SELECT response when available."""
+        for line in lines:
+            if isinstance(line, bytes):
+                match = re.search(rb"\bUIDVALIDITY\s+(\d+)\b", line)
+                if match:
+                    return int(match.group(1))
+        return None
+
+    @staticmethod
+    def _extract_uid_next(lines) -> Optional[int]:
+        """Extract the next predicted UID from a SELECT response."""
+        for line in lines:
+            if isinstance(line, bytes):
+                match = re.search(rb"\bUIDNEXT\s+(\d+)\b", line)
+                if match:
+                    return int(match.group(1))
+        return None
 
     async def _parse_email(self, raw_email: bytes, uid: str) -> Optional[Dict]:
         """Parse raw email data into structured format."""
@@ -255,10 +366,3 @@ class SMTPClient:
         except Exception as e:
             logger.error("Error parsing email from %s: %s", self.config.name, e)
             return None
-
-    def __del__(self):
-        """Cleanup on deletion."""
-        if self.client and self._connected:
-            with contextlib.suppress(Exception):
-                # This is a sync method, so we can't await
-                self.client.close()

@@ -2,10 +2,13 @@
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List
 
+from sqlalchemy import func
+
 from src.database.connection import get_db_session
+from src.email import sanitize_db_text
 from src.email.smtp_client import SMTPClient
 from src.email.text_extractor import TextExtractor
 from src.models.email import EmailLog
@@ -75,6 +78,7 @@ class EmailProcessor:
         """Process emails from a single server."""
         config_id = config.id
         config_host = config.host
+        completed = False
 
         try:
             # Get or create client for this server
@@ -83,27 +87,54 @@ class EmailProcessor:
                 self.active_clients[client_key] = SMTPClient(config)
 
             client = self.active_clients[client_key]
+            sync_since = self._get_sync_since(config_id)
 
             # Fetch and process emails in batches
             # Stats are updated incrementally after each batch so progress
             # is persisted even if a later batch fails (e.g. IMAP timeout
             # on large mailboxes like Gmail All Mail).
-            async for batch in client.fetch_new_emails():
+            async for batch in client.fetch_new_emails(since=sync_since):
                 await self._process_emails(batch)
                 if batch:
                     await self._update_server_stats(config, len(batch))
+            completed = True
 
         except Exception as e:
-            logger.error("Error processing server %s: %s", getattr(config, "name", "unknown"), e)
+            logger.error(
+                "Error processing server %s: %s: %r",
+                getattr(config, "name", "unknown"),
+                type(e).__name__,
+                e,
+            )
         finally:
-            # Always update last_check, even if processing was interrupted
-            try:
-                with get_db_session() as db:
-                    db_config = db.query(SMTPConfig).filter(SMTPConfig.id == config_id).first()
-                    if db_config:
-                        db_config.last_check = datetime.now(tz=timezone.utc)
-            except Exception as e:
-                logger.error("Error updating last_check for config %s: %s", config_id, e)
+            if completed:
+                try:
+                    with get_db_session() as db:
+                        db_config = db.query(SMTPConfig).filter(SMTPConfig.id == config_id).first()
+                        if db_config:
+                            db_config.last_check = datetime.now(tz=timezone.utc)
+                except Exception as e:
+                    logger.error("Error updating last_check for config %s: %s", config_id, e)
+
+        return completed
+
+    def _get_sync_since(self, config_id: int):
+        """Resume near the newest stored email instead of rescanning the mailbox."""
+        with get_db_session() as db:
+            latest_email_date = (
+                db.query(func.max(EmailLog.email_date))
+                .filter(EmailLog.smtp_config_id == config_id)
+                .scalar()
+            )
+
+        if latest_email_date is None:
+            return None
+
+        if latest_email_date.tzinfo is None:
+            latest_email_date = latest_email_date.replace(tzinfo=timezone.utc)
+
+        now = datetime.now(tz=timezone.utc)
+        return min(latest_email_date, now) - timedelta(days=1)
 
     async def _process_emails(self, emails: List[dict]):
         """Process a batch of emails."""
@@ -127,17 +158,17 @@ class EmailProcessor:
                         continue
 
                     # Get body content, converting HTML to plain text if needed
-                    body_plain = email_data.get("body_plain", "")
-                    body_html = email_data.get("body_html", "")
+                    body_plain = sanitize_db_text(email_data.get("body_plain", ""))
+                    body_html = sanitize_db_text(email_data.get("body_html", ""))
                     if not body_plain and body_html:
                         body_plain = text_extractor._extract_html(body_html.encode("utf-8", errors="replace")) or ""
 
                     email_log = EmailLog(
                         smtp_config_id=email_data["smtp_config_id"],
-                        sender=email_data["sender"],
-                        recipient=email_data["recipient"],
-                        subject=email_data["subject"],
-                        message_id=email_data["message_id"],
+                        sender=sanitize_db_text(email_data["sender"]),
+                        recipient=sanitize_db_text(email_data["recipient"]),
+                        subject=sanitize_db_text(email_data["subject"]),
+                        message_id=sanitize_db_text(email_data["message_id"])[:255],
                         email_date=email_data["email_date"],
                         attachment_count=email_data["attachment_count"],
                         body_plain=body_plain,
@@ -165,6 +196,7 @@ class EmailProcessor:
 
             except Exception as e:
                 logger.error("Error processing email %s: %s", email_data.get("message_id", "unknown"), e)
+                raise
 
     async def _update_server_stats(self, config: SMTPConfig, email_count: int):
         """Update server statistics."""
@@ -193,7 +225,9 @@ class EmailProcessor:
                 # session conflicts when _process_server opens its own sessions.
                 config_copy = SMTPConfig.create_detached(config)
 
-            await self._process_server(config_copy)
+            completed = await self._process_server(config_copy)
+            if not completed:
+                return {"error": f"Processing failed for {config_copy.name}; check server logs"}
             return {"success": True, "message": f"Processed emails from {config_copy.name}"}
 
         except Exception as e:

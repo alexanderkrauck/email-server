@@ -125,6 +125,32 @@ async def test_process_attachment_creates_db_object():
 
 
 @pytest.mark.asyncio
+async def test_process_attachment_removes_nul_characters():
+    """PostgreSQL-incompatible NUL characters are removed from extracted text."""
+    from src.email.attachment_handler import AttachmentHandler
+    from src.storage_config.resolver import StorageConfig
+
+    handler = AttachmentHandler()
+    mock_part = MagicMock()
+    mock_part.get_filename.return_value = "nul.txt"
+    mock_part.get_content_type.return_value = "text/plain"
+    mock_part.get.return_value = ""
+    mock_part.get_payload.return_value = b"before\x00after"
+    storage_config = StorageConfig(
+        store_text_only=False,
+        max_attachment_size=1024,
+        extract_pdf_text=True,
+        extract_docx_text=True,
+        extract_image_text=True,
+        extract_other_text=True,
+    )
+
+    attachment = await handler._process_attachment(mock_part, 1, storage_config)
+
+    assert attachment.text_content == "beforeafter"
+
+
+@pytest.mark.asyncio
 async def test_extract_attachments_with_attachment():
     """Test extracting attachments from email with an attachment."""
     from src.email.attachment_handler import AttachmentHandler

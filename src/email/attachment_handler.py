@@ -67,9 +67,11 @@ class AttachmentHandler:
             storage_config = resolve_storage_config(None)
 
         try:
+            from src.email import sanitize_db_text
+
             filename = part.get_filename() or f"attachment_{email_log_id}_unknown"
             content_type = part.get_content_type()
-            content_id = part.get("Content-ID", "").strip("<>")
+            content_id = sanitize_db_text(part.get("Content-ID", "").strip("<>"))
 
             payload = part.get_payload(decode=True)
             if not payload:
@@ -94,7 +96,7 @@ class AttachmentHandler:
             text_content = await text_extractor.extract(payload, content_type, storage_config)
 
             if text_content:
-                attachment.text_content = text_content
+                attachment.text_content = sanitize_db_text(text_content)
                 logger.info("Extracted text for %s (%s chars)", filename, len(text_content))
             else:
                 logger.debug("No text extracted for %s (type: %s)", filename, content_type)

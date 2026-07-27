@@ -30,7 +30,7 @@ def run_server():
     logger.info("API Documentation available at: /api/v1/docs")
 
     uvicorn.run(
-        "server:final_app",
+        "src.server:final_app",
         host=settings.api_host,
         port=settings.api_port,
         reload=settings.api_reload,

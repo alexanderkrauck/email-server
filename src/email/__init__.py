@@ -3,11 +3,17 @@
 import re
 
 
+def sanitize_db_text(value: str) -> str:
+    """Remove characters PostgreSQL cannot store in text fields."""
+    return value.replace("\x00", "")
+
+
 def sanitize_filename(filename: str) -> str:
     """Sanitize filename by removing invalid characters, spaces, and encoding issues."""
     if not filename:
         return "unknown"
 
+    filename = sanitize_db_text(filename)
     filename = filename.replace("=_utf-8_B_", "").replace("=_utf-8_Q_", "")
     filename = filename.replace("_utf-8_", "").replace("=C3=A4", "ae").replace("=C3=BC", "ue")
     filename = filename.replace("=C3=B6", "oe").replace("=C3=9F", "ss")

@@ -77,14 +77,15 @@ class EmailProcessor:
     async def _process_server(self, config: SMTPConfig):
         """Process emails from a single server."""
         config_id = config.id
-        config_host = config.host
         completed = False
 
         try:
             # Get or create client for this server
-            client_key = f"{config_id}_{config_host}"
+            client_key = config_id
             if client_key not in self.active_clients:
                 self.active_clients[client_key] = SMTPClient(config)
+            else:
+                await self.active_clients[client_key].update_config(config)
 
             client = self.active_clients[client_key]
             sync_since = self._get_sync_since(config_id)

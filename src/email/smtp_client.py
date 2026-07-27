@@ -19,12 +19,23 @@ logger = logging.getLogger(__name__)
 class SMTPClient:
     """Client for connecting to SMTP/IMAP servers and fetching emails."""
 
+    CONNECTION_FIELDS = ("host", "port", "username", "password", "imap_use_ssl", "imap_use_tls")
+
     def __init__(self, smtp_config: SMTPConfig):
         self.config = smtp_config
         self.client = None
         self._connected = False
         self._last_uids: Dict[str, int] = {}
         self._uid_validities: Dict[str, int] = {}
+
+    async def update_config(self, smtp_config: SMTPConfig):
+        """Apply changed account settings and reconnect when required."""
+        old_settings = tuple(getattr(self.config, field, None) for field in self.CONNECTION_FIELDS)
+        new_settings = tuple(getattr(smtp_config, field, None) for field in self.CONNECTION_FIELDS)
+        self.config = smtp_config
+
+        if old_settings != new_settings:
+            await self.disconnect()
 
     async def connect(self) -> bool:
         """Connect to the IMAP server."""

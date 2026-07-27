@@ -1,6 +1,7 @@
 """Tests for SMTP client - simplified to avoid connection issues."""
 
 from datetime import datetime, timezone
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -42,6 +43,44 @@ async def test_ensure_connected_replaces_stale_client(mock_smtp_config):
     stale_client.logout.assert_awaited_once()
     fresh_client.wait_hello_from_server.assert_awaited_once()
     assert smtp_client.client is fresh_client
+    assert smtp_client._connected is True
+
+
+@pytest.mark.asyncio
+async def test_update_config_disconnects_when_password_changes(mock_smtp_config):
+    """Updated credentials invalidate the cached IMAP connection."""
+    from src.email.smtp_client import SMTPClient
+
+    smtp_client = SMTPClient(mock_smtp_config)
+    smtp_client.client = AsyncMock()
+    smtp_client._connected = True
+    old_client = smtp_client.client
+    updated_config = replace(mock_smtp_config, password="new-password")
+
+    await smtp_client.update_config(updated_config)
+
+    old_client.logout.assert_awaited_once()
+    assert smtp_client.config.password == "new-password"
+    assert smtp_client.client is None
+    assert smtp_client._connected is False
+
+
+@pytest.mark.asyncio
+async def test_update_config_keeps_connection_for_display_change(mock_smtp_config):
+    """Non-connection metadata changes do not interrupt IMAP."""
+    from src.email.smtp_client import SMTPClient
+
+    smtp_client = SMTPClient(mock_smtp_config)
+    smtp_client.client = AsyncMock()
+    smtp_client._connected = True
+    current_client = smtp_client.client
+    updated_config = replace(mock_smtp_config, name="Renamed Account")
+
+    await smtp_client.update_config(updated_config)
+
+    current_client.logout.assert_not_awaited()
+    assert smtp_client.config.name == "Renamed Account"
+    assert smtp_client.client is current_client
     assert smtp_client._connected is True
 
 

@@ -6,7 +6,7 @@ import logging
 import secrets
 from datetime import datetime
 from typing import Annotated
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -22,7 +22,10 @@ from src.email.smtp_sender import EmailSenderManager
 from src.handlers.email_handler_types import SendMailInput
 from src.models.smtp_config import SMTPConfig
 from src.models.user import User
-from src.security.account_connect_tokens import verify_account_connect_token
+from src.security.account_connect_tokens import (
+    verify_account_connect_token,
+    verify_password_setup_token,
+)
 from src.security.auth import get_current_user, owned_account_query
 from src.security.download_tokens import issue_download_token, verify_download_token
 from src.security.provider_tokens import GMAIL_MAIL_SCOPE, encode_oauth_credential
@@ -36,6 +39,11 @@ from src.services.mail_service import (
     send_mail,
     serialize_attachment,
     serialize_email,
+)
+from src.web_pages import (
+    invalid_setup_page,
+    password_form_page,
+    password_saved_page,
 )
 
 logger = logging.getLogger(__name__)
@@ -63,7 +71,7 @@ class MailAccountCreate(BaseModel):
     smtp_host: str
     smtp_port: int = Field(default=465, ge=1, le=65535)
     username: str
-    password: SecretStr = Field(min_length=1)
+    password: SecretStr | None = Field(default=None, min_length=1)
     imap_use_ssl: bool = True
     imap_use_tls: bool = False
     smtp_use_ssl: bool = True
@@ -125,6 +133,8 @@ def validate_transport(account: SMTPConfig) -> None:
 
 async def verify_account_connection(account: SMTPConfig) -> dict[str, bool]:
     """Test a detached account without returning provider error details or credentials."""
+    if not account.credential_ciphertext:
+        return {"imap": False, "smtp": False}
     detached = SMTPConfig.create_detached(account)
     imap = SMTPClient(detached)
     try:
@@ -138,6 +148,18 @@ async def verify_account_connection(account: SMTPConfig) -> dict[str, bool]:
         sender.disconnect()
         await email_sender_manager.invalidate(account.id)
     return {"imap": imap_ok, "smtp": smtp_ok}
+
+
+async def safe_connection_test(account: SMTPConfig) -> dict[str, bool]:
+    try:
+        return await verify_account_connection(account)
+    except Exception as exc:
+        logger.info(
+            "Connection test failed for account %s: %s",
+            account.id,
+            type(exc).__name__,
+        )
+        return {"imap": False, "smtp": False}
 
 
 @router.post("/auth/google")
@@ -181,23 +203,31 @@ async def create_account(payload: MailAccountCreate, user: CurrentUser, db: Sess
         raise HTTPException(status_code=409, detail="An account with this name already exists")
     values = payload.model_dump(exclude={"password", "verify_connection"})
     account = SMTPConfig(owner_user_id=user.id, auth_type="password", **values)
-    account.sync_state = "pending" if account.enabled else "disabled"
-    account.password = payload.password.get_secret_value()
+    if payload.password is not None:
+        account.password = payload.password.get_secret_value()
+    account.sync_state = (
+        "disabled"
+        if not account.enabled
+        else ("pending" if account.credential_ciphertext else "credentials_required")
+    )
     validate_transport(account)
     db.add(account)
     db.flush()
-    if payload.verify_connection:
-        connection = await verify_account_connection(account)
+    connection = None
+    if payload.verify_connection and account.credential_ciphertext:
+        connection = await safe_connection_test(account)
         if not all(connection.values()):
-            db.rollback()
-            raise HTTPException(
-                status_code=400,
-                detail={"message": "Provider connection failed", **connection},
-            )
+            account.sync_state = "error"
+            account.last_error_code = "CONNECTION_TEST_FAILED"
+            account.last_error_message = "Saved configuration did not pass the connection test"
     db.commit()
     db.refresh(account)
     logger.info("User %s added mail account %s", user.id, account.id)
-    return account_response(account)
+    result = account_response(account)
+    result["configuration_saved"] = True
+    if connection is not None:
+        result["connection_test"] = connection
+    return result
 
 
 @router.get("/accounts/{account_id:int}")
@@ -245,14 +275,9 @@ async def update_account(
         "smtp_use_tls",
     }
     should_verify = payload.verify_connection and bool(payload.model_fields_set & connection_fields)
-    if should_verify:
-        connection = await verify_account_connection(account)
-        if not all(connection.values()):
-            db.rollback()
-            raise HTTPException(
-                status_code=400,
-                detail={"message": "Provider connection failed", **connection},
-            )
+    connection = None
+    if should_verify and account.credential_ciphertext:
+        connection = await safe_connection_test(account)
     if identity_changed:
         account.sync_cursors.clear()
         account.initial_sync_complete = False
@@ -264,19 +289,158 @@ async def update_account(
     account.sync_lock_token = None
     account.sync_locked_at = None
     account.sync_lock_expires_at = None
-    account.last_error_code = None
-    account.last_error_message = None
+    connection_failed = connection is not None and not all(connection.values())
+    account.last_error_code = (
+        "CONNECTION_TEST_FAILED" if connection_failed else None
+    )
+    account.last_error_message = (
+        "Saved configuration did not pass the connection test"
+        if connection_failed
+        else None
+    )
     account.consecutive_failures = 0
     account.retry_at = None
     account.sync_state = (
         "disabled"
         if not account.enabled
-        else ("healthy" if account.backfill_complete else "pending")
+        else (
+            "credentials_required"
+            if not account.credential_ciphertext
+            else (
+                "error"
+                if connection_failed
+                else ("healthy" if account.backfill_complete else "pending")
+            )
+        )
     )
     db.commit()
     db.refresh(account)
     await email_sender_manager.invalidate(account.id)
-    return account_response(account)
+    result = account_response(account)
+    result["configuration_saved"] = True
+    if connection is not None:
+        result["connection_test"] = connection
+    return result
+
+
+def _password_setup_account(
+    db: Session,
+    account_id: int,
+    token: str,
+) -> SMTPConfig | None:
+    account = db.query(SMTPConfig).filter(SMTPConfig.id == account_id).first()
+    if not account:
+        return None
+    try:
+        claims = verify_password_setup_token(
+            token,
+            account_id,
+            account.credential_ciphertext,
+        )
+    except ValueError:
+        return None
+    if claims.user_id != account.owner_user_id:
+        return None
+    return account
+
+
+def _password_setup_session_account(
+    request: Request,
+    db: Session,
+    account_id: int,
+) -> SMTPConfig | None:
+    grant = request.session.get("mail_password_setup")
+    if not isinstance(grant, dict) or grant.get("account_id") != account_id:
+        return None
+    return _password_setup_account(db, account_id, str(grant.get("token") or ""))
+
+
+@router.get("/accounts/{account_id:int}/password/setup")
+async def start_password_setup(
+    account_id: int,
+    token: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    account = _password_setup_account(db, account_id, token)
+    if not account:
+        return invalid_setup_page()
+    request.session["mail_password_setup"] = {
+        "account_id": account_id,
+        "token": token,
+    }
+    return RedirectResponse(
+        url=f"{settings.public_base_url.rstrip('/')}/api/v1/accounts/{account_id}/password",
+        status_code=303,
+        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+    )
+
+
+@router.get("/accounts/{account_id:int}/password")
+async def password_setup_form(
+    account_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    account = _password_setup_session_account(request, db, account_id)
+    if not account:
+        request.session.pop("mail_password_setup", None)
+        return invalid_setup_page()
+    return password_form_page(
+        account_name=account.name,
+        address=account.account_name or account.username,
+    )
+
+
+@router.post("/accounts/{account_id:int}/password")
+async def save_password_setup(
+    account_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    account = _password_setup_session_account(request, db, account_id)
+    if not account:
+        request.session.pop("mail_password_setup", None)
+        return invalid_setup_page()
+    content_type = request.headers.get("content-type", "").partition(";")[0]
+    body = await request.body()
+    if content_type != "application/x-www-form-urlencoded" or len(body) > 4096:
+        return password_form_page(
+            account_name=account.name,
+            address=account.account_name or account.username,
+            error="The password submission was not valid. Please try again.",
+        )
+    try:
+        values = parse_qs(
+            body.decode("utf-8"),
+            keep_blank_values=True,
+            max_num_fields=2,
+        )
+    except (UnicodeDecodeError, ValueError):
+        values = {}
+    passwords = values.get("password", [])
+    password = passwords[0] if len(passwords) == 1 else ""
+    if not password or len(password) > 1024:
+        return password_form_page(
+            account_name=account.name,
+            address=account.account_name or account.username,
+            error="Enter a valid mailbox password.",
+        )
+
+    account.password = password
+    account.last_error_code = None
+    account.last_error_message = None
+    account.consecutive_failures = 0
+    account.retry_at = None
+    account.sync_lock_token = None
+    account.sync_locked_at = None
+    account.sync_lock_expires_at = None
+    account.sync_state = "pending" if account.enabled else "disabled"
+    db.commit()
+    await email_sender_manager.invalidate(account.id)
+    request.session.pop("mail_password_setup", None)
+    logger.info("User %s stored a credential for account %s", account.owner_user_id, account.id)
+    return password_saved_page()
 
 
 @router.delete("/accounts/{account_id:int}")
@@ -295,6 +459,8 @@ async def delete_account(account_id: int, user: CurrentUser, db: Session = Depen
 @router.post("/accounts/{account_id:int}/test")
 async def test_account(account_id: int, user: CurrentUser, db: Session = Depends(get_db)):
     account = owned_account(db, user.id, account_id)
+    if not account.credential_ciphertext:
+        raise HTTPException(status_code=400, detail="Mailbox password is not configured")
     connection = await verify_account_connection(account)
     if not all(connection.values()):
         raise HTTPException(status_code=400, detail=connection)
@@ -481,9 +647,7 @@ async def gmail_callback(
     account.retry_at = None
     db.commit()
     db.refresh(account)
-    return RedirectResponse(
-        url=f"{settings.public_base_url.rstrip('/')}?gmail_connected={account.id}"
-    )
+    return RedirectResponse(url=f"{settings.public_base_url.rstrip('/')}?connected=gmail")
 
 
 @router.get("/emails")

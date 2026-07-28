@@ -20,6 +20,7 @@ from src.handlers.email_handler import (
 from src.mcp_tools import register_mcp_tools
 from src.security.auth import build_mcp_auth_provider
 from src.security.crypto import persistent_secret
+from src.web_pages import service_page
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +66,8 @@ mcp = FastMCP(
     "Email Server",
     instructions=(
         "Manage, search, retrieve, and send mail owned by the authenticated user. "
-        "Mailbox passwords are write-only and are never returned."
+        "Mailbox passwords are write-only and are never returned. Passwords may be "
+        "supplied directly or entered through a short-lived password-only browser link."
     ),
     auth=build_mcp_auth_provider(),
     mask_error_details=True,
@@ -97,13 +99,8 @@ final_app.mount("/api/v1", api_app)
 
 
 @final_app.get("/")
-async def root():
-    return {
-        "service": "Email Server",
-        "version": "2.0.0",
-        "auth_mode": settings.auth_mode,
-        "apis": {"http": "/api/v1", "mcp": "/mcp", "health": "/api/v1/health"},
-    }
+async def root(connected: str | None = None):
+    return service_page(connected)
 
 
 # The MCP ASGI app owns /mcp and root-level OAuth discovery/callback routes.

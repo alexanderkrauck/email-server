@@ -64,7 +64,9 @@ def rotate_plaintext_credentials() -> int:
     updated = 0
     with SessionLocal.begin() as db:
         for account in db.query(SMTPConfig).all():
-            if not account.credential_ciphertext.startswith(_ENCRYPTED_PREFIX):
+            if account.credential_ciphertext and not account.credential_ciphertext.startswith(
+                _ENCRYPTED_PREFIX
+            ):
                 account.credential_ciphertext = encrypt_secret(account.credential_ciphertext)
                 updated += 1
     return updated

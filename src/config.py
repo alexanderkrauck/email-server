@@ -83,6 +83,7 @@ class Settings(BaseSettings):
     session_secret: str = ""
     attachment_token_ttl_seconds: int = 300
     account_connect_token_ttl_seconds: int = 300
+    password_setup_token_ttl_seconds: int = 900
     search_cursor_ttl_seconds: int = 86_400
     extraction_timeout_seconds: int = 30
     max_extracted_text_chars: int = 250_000

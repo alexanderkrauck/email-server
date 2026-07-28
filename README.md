@@ -112,6 +112,7 @@ authorization back to ChatGPT.
 - `list_mail_accounts`
 - `add_mail_account`
 - `update_mail_account`
+- `begin_mail_account_password_setup`
 - `begin_gmail_connection`
 - `search_mail`
 - `search_mail_regex`
@@ -121,8 +122,12 @@ authorization back to ChatGPT.
 - `send_mail`
 
 `list_mail_accounts` includes non-secret connection settings and exact stored message counts.
-`add_mail_account` and `update_mail_account` accept write-only passwords for IMAP/SMTP
-accounts. `begin_gmail_connection` returns a five-minute signed URL for Google consent.
+`add_mail_account` and `update_mail_account` accept optional write-only passwords for
+IMAP/SMTP accounts. When a client will not transmit passwords, omit the password and
+use the returned setup URL or call `begin_mail_account_password_setup`; the linked form
+asks only for the password. Failed connection tests retain both configuration and
+encrypted credentials so settings can be corrected without entering the password again.
+`begin_gmail_connection` returns a five-minute signed URL for Google consent.
 Deletion, standalone connection tests, and manual sync remain outside the MCP surface.
 
 `search_mail` and `search_mail_regex` return `total_count`, `raw_count`,

@@ -25,7 +25,7 @@ class SMTPConfig(Base):
     smtp_host = Column(String(255), nullable=True)  # SMTP host (if different from IMAP)
     smtp_port = Column(Integer, nullable=False, default=465)  # SMTP port
     username = Column(String(255), nullable=False)
-    credential_ciphertext = Column(Text, nullable=False)
+    credential_ciphertext = Column(Text, nullable=True)
     # IMAP settings
     imap_use_ssl = Column(Boolean, default=True)  # IMAP typically uses SSL on 993
     imap_use_tls = Column(Boolean, default=False)

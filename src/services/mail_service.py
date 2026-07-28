@@ -1158,6 +1158,11 @@ async def send_mail(
     from src.handlers.email_handler import email_sender_manager
 
     account = owned_account(db, user.id, payload.account_id)
+    if not account.credential_ciphertext:
+        raise HTTPException(
+            status_code=400,
+            detail="Mailbox password is not configured",
+        )
     recipients = payload.to_addresses + payload.cc_addresses + payload.bcc_addresses
     if not recipients or len(recipients) > settings.max_send_recipients:
         raise HTTPException(status_code=400, detail="Recipient count is outside the configured limit")

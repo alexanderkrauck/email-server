@@ -1,4 +1,4 @@
-"""Short-lived grants for starting provider account connection flows."""
+"""Short-lived grants for provider and mailbox credential connection flows."""
 
 import base64
 import binascii
@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import time
+from dataclasses import dataclass
 
 from src.config import settings
 from src.security.crypto import persistent_secret
@@ -26,13 +27,9 @@ def _decode_segment(value: str) -> bytes:
     return decoded
 
 
-def issue_account_connect_token(user_id: int) -> str:
+def _issue(claims: dict) -> str:
     payload = json.dumps(
-        {
-            "purpose": "gmail-account-connect",
-            "user_id": user_id,
-            "expires_at": int(time.time()) + settings.account_connect_token_ttl_seconds,
-        },
+        claims,
         separators=(",", ":"),
         sort_keys=True,
     ).encode()
@@ -40,7 +37,7 @@ def issue_account_connect_token(user_id: int) -> str:
     return f"{_encode_segment(payload)}.{_encode_segment(signature)}"
 
 
-def verify_account_connect_token(token: str) -> int:
+def _verify(token: str) -> dict:
     try:
         payload_segment, signature_segment = token.split(".", 1)
         payload = _decode_segment(payload_segment)
@@ -49,17 +46,83 @@ def verify_account_connect_token(token: str) -> int:
         if not hmac.compare_digest(signature, expected):
             raise ValueError
         claims = json.loads(payload)
-        if (
-            claims["purpose"] != "gmail-account-connect"
-            or claims["expires_at"] < int(time.time())
-        ):
+        if claims["expires_at"] < int(time.time()):
             raise ValueError
-        return int(claims["user_id"])
+        return claims
     except (
         binascii.Error,
         UnicodeError,
         ValueError,
+        TypeError,
         KeyError,
         json.JSONDecodeError,
     ) as exc:
         raise ValueError("Invalid or expired account connection token") from exc
+
+
+def issue_account_connect_token(user_id: int) -> str:
+    return _issue(
+        {
+            "purpose": "gmail-account-connect",
+            "user_id": user_id,
+            "expires_at": int(time.time()) + settings.account_connect_token_ttl_seconds,
+        }
+    )
+
+
+def verify_account_connect_token(token: str) -> int:
+    claims = _verify(token)
+    if claims.get("purpose") != "gmail-account-connect":
+        raise ValueError("Invalid or expired account connection token")
+    return int(claims["user_id"])
+
+
+def credential_version(credential_ciphertext: str | None) -> str:
+    value = credential_ciphertext or ""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:24]
+
+
+@dataclass(frozen=True)
+class PasswordSetupClaims:
+    user_id: int
+    account_id: int
+
+
+def issue_password_setup_token(
+    user_id: int,
+    account_id: int,
+    credential_ciphertext: str | None,
+) -> str:
+    return _issue(
+        {
+            "purpose": "mail-password-setup",
+            "user_id": user_id,
+            "account_id": account_id,
+            "credential_version": credential_version(credential_ciphertext),
+            "expires_at": int(time.time()) + settings.password_setup_token_ttl_seconds,
+        }
+    )
+
+
+def verify_password_setup_token(
+    token: str,
+    account_id: int,
+    credential_ciphertext: str | None,
+) -> PasswordSetupClaims:
+    claims = _verify(token)
+    try:
+        if (
+            claims.get("purpose") != "mail-password-setup"
+            or int(claims["account_id"]) != account_id
+            or not hmac.compare_digest(
+                str(claims["credential_version"]),
+                credential_version(credential_ciphertext),
+            )
+        ):
+            raise ValueError
+        return PasswordSetupClaims(
+            user_id=int(claims["user_id"]),
+            account_id=int(claims["account_id"]),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("Invalid or expired password setup link") from exc

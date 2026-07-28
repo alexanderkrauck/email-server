@@ -29,7 +29,9 @@ def test_download_token_is_bound_to_attachment_and_expiry_claim():
 def test_account_connect_token_is_signed_and_user_bound():
     from src.security.account_connect_tokens import (
         issue_account_connect_token,
+        issue_password_setup_token,
         verify_account_connect_token,
+        verify_password_setup_token,
     )
 
     token = issue_account_connect_token(user_id=7)
@@ -38,6 +40,23 @@ def test_account_connect_token_is_signed_and_user_bound():
     assert verify_account_connect_token(token) == 7
     with pytest.raises(ValueError):
         verify_account_connect_token(token[:-1] + ("A" if token[-1] != "A" else "B"))
+
+    password_token = issue_password_setup_token(
+        user_id=7,
+        account_id=42,
+        credential_ciphertext=None,
+    )
+    claims = verify_password_setup_token(password_token, 42, None)
+    assert claims.user_id == 7
+    assert claims.account_id == 42
+    with pytest.raises(ValueError):
+        verify_password_setup_token(password_token, 43, None)
+    with pytest.raises(ValueError):
+        verify_password_setup_token(password_token, 42, "changed-credential")
+    with pytest.raises(ValueError):
+        verify_account_connect_token(password_token)
+    with pytest.raises(ValueError):
+        verify_password_setup_token(token, 42, None)
 
 
 @pytest.mark.asyncio

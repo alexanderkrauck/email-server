@@ -15,7 +15,10 @@ from src.handlers.email_handler import (
     update_account,
 )
 from src.handlers.email_handler_types import SendMailInput
-from src.security.account_connect_tokens import issue_account_connect_token
+from src.security.account_connect_tokens import (
+    issue_account_connect_token,
+    issue_password_setup_token,
+)
 from src.security.auth import current_mcp_user
 from src.security.download_tokens import issue_download_token
 from src.security.mcp_errors import mcp_error_boundary
@@ -28,6 +31,7 @@ from src.services.mail_service import (
     SearchPage,
     get_thread as load_thread,
     mail_account_summary,
+    owned_account,
     owned_email,
     search_mail as lexical_search,
     search_mail_regex as regex_search,
@@ -69,6 +73,21 @@ def _transport_flags(mode: Literal["ssl", "starttls"]) -> tuple[bool, bool]:
     return mode == "ssl", mode == "starttls"
 
 
+def _password_setup_details(user_id: int, account) -> dict:
+    token = issue_password_setup_token(
+        user_id,
+        account.id,
+        account.credential_ciphertext,
+    )
+    return {
+        "password_setup_url": (
+            f"{settings.public_base_url.rstrip('/')}"
+            f"/api/v1/accounts/{account.id}/password/setup?token={token}"
+        ),
+        "password_setup_expires_in": settings.password_setup_token_ttl_seconds,
+    }
+
+
 def register_mcp_tools(mcp) -> None:
     @mcp.tool(
         name="list_mail_accounts",
@@ -87,9 +106,10 @@ def register_mcp_tools(mcp) -> None:
     @mcp.tool(
         name="add_mail_account",
         description=(
-            "Add an IMAP/SMTP mailbox owned by the signed-in user. The password is "
-            "write-only, encrypted at rest, and never included in any response. "
-            "Use begin_gmail_connection instead for Gmail OAuth."
+            "Add an IMAP/SMTP mailbox owned by the signed-in user. Password is optional: "
+            "supply it directly when supported, or omit it and open the returned "
+            "password-only setup URL. Configuration is retained when connection tests "
+            "fail. Use begin_gmail_connection instead for Gmail OAuth."
         ),
         annotations=WRITE_EXTERNAL,
     )
@@ -98,9 +118,9 @@ def register_mcp_tools(mcp) -> None:
         name: str,
         email_address: str,
         username: str,
-        password: str,
         imap_host: str,
         smtp_host: str,
+        password: str | None = None,
         provider: Literal["imap", "zoho", "gmail"] = "imap",
         imap_port: int = 993,
         smtp_port: int = 465,
@@ -130,13 +150,18 @@ def register_mcp_tools(mcp) -> None:
             verify_connection=verify_connection,
         )
         with SessionLocal() as db:
-            return await create_account(payload, user, db)
+            result = await create_account(payload, user, db)
+            if not result["credential_configured"]:
+                account = owned_account(db, user.id, result["id"])
+                result.update(_password_setup_details(user.id, account))
+            return result
 
     @mcp.tool(
         name="update_mail_account",
         description=(
             "Update one owned mailbox configuration. Omitted fields remain unchanged. "
-            "A supplied password is write-only, encrypted at rest, and never returned."
+            "A supplied password is write-only, encrypted at rest, and never returned. "
+            "Saved settings and credentials are retained when a connection test fails."
         ),
         annotations=WRITE_EXTERNAL,
     )
@@ -187,6 +212,27 @@ def register_mcp_tools(mcp) -> None:
         )
         with SessionLocal() as db:
             return await update_account(account_id, payload, user, db)
+
+    @mcp.tool(
+        name="begin_mail_account_password_setup",
+        description=(
+            "Create a short-lived browser URL that asks only for the password of an "
+            "existing IMAP/SMTP account. Use this when the MCP client will not transmit "
+            "passwords. The password is stored independently of connection-test results."
+        ),
+        annotations=WRITE_EXTERNAL,
+    )
+    @mcp_error_boundary
+    async def begin_mail_account_password_setup(account_id: int) -> dict:
+        user = await current_mcp_user()
+        with SessionLocal() as db:
+            account = owned_account(db, user.id, account_id)
+            if account.auth_type != "password":
+                raise ValueError("OAuth mailboxes do not accept mailbox passwords")
+            return {
+                "account_id": account.id,
+                **_password_setup_details(user.id, account),
+            }
 
     @mcp.tool(
         name="begin_gmail_connection",

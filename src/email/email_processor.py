@@ -64,7 +64,11 @@ class EmailProcessor:
             # Get all enabled SMTP configs
             configs = (
                 db.query(SMTPConfig)
-                .filter(SMTPConfig.enabled)
+                .filter(
+                    SMTPConfig.enabled,
+                    SMTPConfig.credential_ciphertext.isnot(None),
+                    SMTPConfig.credential_ciphertext != "",
+                )
                 .order_by(
                     SMTPConfig.backfill_complete.desc(),
                     SMTPConfig.last_success_at.asc().nullsfirst(),
@@ -856,6 +860,8 @@ class EmailProcessor:
 
                 if not config.enabled:
                     return {"error": "Server is disabled"}
+                if not config.credential_ciphertext:
+                    return {"error": "Mailbox password is not configured"}
 
                 # Create a detached copy before closing the session, matching
                 # the pattern used in _process_all_servers. This avoids nested

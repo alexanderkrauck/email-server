@@ -28,6 +28,14 @@ class MailAccountDetails(TypedDict):
     address: str
     provider: str
     auth_type: str
+    username: str
+    imap_host: str
+    imap_port: int
+    imap_security: str
+    smtp_host: str
+    smtp_port: int
+    smtp_security: str
+    credential_configured: bool
     enabled: bool
     last_sync: str | None
     message_count: int
@@ -94,6 +102,14 @@ def mail_account_summary(db: Session, user: User) -> MailAccountSummary:
             "address": account.account_name or account.username,
             "provider": account.provider,
             "auth_type": account.auth_type,
+            "username": account.username,
+            "imap_host": account.host,
+            "imap_port": account.port,
+            "imap_security": "ssl" if account.imap_use_ssl else "starttls",
+            "smtp_host": account.smtp_host or account.host,
+            "smtp_port": account.smtp_port,
+            "smtp_security": "ssl" if account.smtp_use_ssl else "starttls",
+            "credential_configured": bool(account.credential_ciphertext),
             "enabled": account.enabled,
             "last_sync": account.last_check.isoformat() if account.last_check else None,
             "message_count": int(message_count),

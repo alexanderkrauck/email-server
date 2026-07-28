@@ -77,6 +77,7 @@ class Settings(BaseSettings):
     jwt_signing_key: str = ""
     session_secret: str = ""
     attachment_token_ttl_seconds: int = 300
+    account_connect_token_ttl_seconds: int = 300
     extraction_timeout_seconds: int = 30
     max_extracted_text_chars: int = 250_000
     max_message_body_chars: int = 250_000

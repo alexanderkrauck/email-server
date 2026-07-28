@@ -20,6 +20,7 @@ from src.email.smtp_sender import EmailSenderManager
 from src.handlers.email_handler_types import SendMailInput
 from src.models.smtp_config import SMTPConfig
 from src.models.user import User
+from src.security.account_connect_tokens import verify_account_connect_token
 from src.security.auth import get_current_user, owned_account_query
 from src.security.download_tokens import issue_download_token, verify_download_token
 from src.security.provider_tokens import GMAIL_MAIL_SCOPE, encode_oauth_credential
@@ -55,7 +56,7 @@ class MailAccountCreate(BaseModel):
     smtp_host: str
     smtp_port: int = Field(default=465, ge=1, le=65535)
     username: str
-    password: SecretStr
+    password: SecretStr = Field(min_length=1)
     imap_use_ssl: bool = True
     imap_use_tls: bool = False
     smtp_use_ssl: bool = True
@@ -67,17 +68,19 @@ class MailAccountCreate(BaseModel):
 class MailAccountUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     account_name: EmailStr | None = None
+    provider: str | None = Field(default=None, pattern="^(imap|zoho|gmail)$")
     host: str | None = None
     port: int | None = Field(default=None, ge=1, le=65535)
     smtp_host: str | None = None
     smtp_port: int | None = Field(default=None, ge=1, le=65535)
     username: str | None = None
-    password: SecretStr | None = None
+    password: SecretStr | None = Field(default=None, min_length=1)
     imap_use_ssl: bool | None = None
     imap_use_tls: bool | None = None
     smtp_use_ssl: bool | None = None
     smtp_use_tls: bool | None = None
     enabled: bool | None = None
+    verify_connection: bool = True
 
 
 class ReplyInput(BaseModel):
@@ -111,6 +114,23 @@ def validate_transport(account: SMTPConfig) -> None:
         raise HTTPException(status_code=400, detail="IMAP must use SSL or STARTTLS")
     if not account.smtp_use_ssl and not account.smtp_use_tls:
         raise HTTPException(status_code=400, detail="SMTP must use SSL or STARTTLS")
+
+
+async def verify_account_connection(account: SMTPConfig) -> dict[str, bool]:
+    """Test a detached account without returning provider error details or credentials."""
+    detached = SMTPConfig.create_detached(account)
+    imap = SMTPClient(detached)
+    try:
+        imap_ok = await imap.connect()
+    finally:
+        await imap.disconnect()
+    sender = await email_sender_manager.get_sender(detached)
+    try:
+        smtp_ok = await sender.connect()
+    finally:
+        sender.disconnect()
+        await email_sender_manager.invalidate(account.id)
+    return {"imap": imap_ok, "smtp": smtp_ok}
 
 
 @router.post("/auth/google")
@@ -159,21 +179,12 @@ async def create_account(payload: MailAccountCreate, user: CurrentUser, db: Sess
     db.add(account)
     db.flush()
     if payload.verify_connection:
-        detached = SMTPConfig.create_detached(account)
-        imap = SMTPClient(detached)
-        try:
-            imap_ok = await imap.connect()
-        finally:
-            await imap.disconnect()
-        sender = await email_sender_manager.get_sender(detached)
-        smtp_ok = await sender.connect()
-        sender.disconnect()
-        await email_sender_manager.invalidate(account.id)
-        if not imap_ok or not smtp_ok:
+        connection = await verify_account_connection(account)
+        if not all(connection.values()):
             db.rollback()
             raise HTTPException(
                 status_code=400,
-                detail={"message": "Provider connection failed", "imap": imap_ok, "smtp": smtp_ok},
+                detail={"message": "Provider connection failed", **connection},
             )
     db.commit()
     db.refresh(account)
@@ -191,12 +202,43 @@ async def update_account(
     account_id: int, payload: MailAccountUpdate, user: CurrentUser, db: Session = Depends(get_db)
 ):
     account = owned_account(db, user.id, account_id)
-    values = payload.model_dump(exclude_unset=True, exclude={"password"})
+    if (
+        payload.name is not None
+        and payload.name != account.name
+        and owned_account_query(db, user).filter(SMTPConfig.name == payload.name).first()
+    ):
+        raise HTTPException(status_code=409, detail="An account with this name already exists")
+    values = payload.model_dump(
+        exclude_unset=True,
+        exclude={"password", "verify_connection"},
+    )
     for field, value in values.items():
         setattr(account, field, value)
     if payload.password is not None:
         account.password = payload.password.get_secret_value()
     validate_transport(account)
+    connection_fields = {
+        "provider",
+        "host",
+        "port",
+        "smtp_host",
+        "smtp_port",
+        "username",
+        "password",
+        "imap_use_ssl",
+        "imap_use_tls",
+        "smtp_use_ssl",
+        "smtp_use_tls",
+    }
+    should_verify = payload.verify_connection and bool(payload.model_fields_set & connection_fields)
+    if should_verify:
+        connection = await verify_account_connection(account)
+        if not all(connection.values()):
+            db.rollback()
+            raise HTTPException(
+                status_code=400,
+                detail={"message": "Provider connection failed", **connection},
+            )
     db.commit()
     db.refresh(account)
     await email_sender_manager.invalidate(account.id)
@@ -214,17 +256,9 @@ async def delete_account(account_id: int, user: CurrentUser, db: Session = Depen
 @router.post("/accounts/{account_id:int}/test")
 async def test_account(account_id: int, user: CurrentUser, db: Session = Depends(get_db)):
     account = owned_account(db, user.id, account_id)
-    detached = SMTPConfig.create_detached(account)
-    imap = SMTPClient(detached)
-    try:
-        imap_ok = await imap.connect()
-    finally:
-        await imap.disconnect()
-    sender = await email_sender_manager.get_sender(detached)
-    smtp_ok = await sender.connect()
-    sender.disconnect()
-    if not imap_ok or not smtp_ok:
-        raise HTTPException(status_code=400, detail={"imap": imap_ok, "smtp": smtp_ok})
+    connection = await verify_account_connection(account)
+    if not all(connection.values()):
+        raise HTTPException(status_code=400, detail=connection)
     return {"imap": "connected", "smtp": "connected"}
 
 
@@ -260,10 +294,10 @@ def _gmail_flow(state: str | None = None):
     return flow
 
 
-@router.get("/accounts/gmail/connect")
-async def connect_gmail(request: Request, user: CurrentUser):
+def _start_gmail_connection(request: Request, user: User) -> RedirectResponse:
     state = secrets.token_urlsafe(32)
     request.session["gmail_oauth_state"] = state
+    request.session["gmail_connect_user_id"] = user.id
     flow = _gmail_flow(state)
     authorization_url, _ = flow.authorization_url(
         access_type="offline", prompt="consent", include_granted_scopes="true"
@@ -271,17 +305,41 @@ async def connect_gmail(request: Request, user: CurrentUser):
     return RedirectResponse(authorization_url)
 
 
+@router.get("/accounts/gmail/connect")
+async def connect_gmail(request: Request, user: CurrentUser):
+    return _start_gmail_connection(request, user)
+
+
+@router.get("/accounts/gmail/connect/mcp")
+async def connect_gmail_from_mcp(
+    request: Request,
+    token: str,
+    db: Session = Depends(get_db),
+):
+    try:
+        user_id = verify_account_connect_token(token)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    user = db.query(User).filter(User.id == user_id, User.status == "active").first()
+    if not user:
+        raise HTTPException(status_code=401, detail="Account connection user is unavailable")
+    return _start_gmail_connection(request, user)
+
+
 @router.get("/accounts/gmail/callback")
 async def gmail_callback(
     request: Request,
     code: str,
     state: str,
-    user: CurrentUser,
     db: Session = Depends(get_db),
 ):
     expected_state = request.session.pop("gmail_oauth_state", None)
     if not expected_state or not secrets.compare_digest(state, expected_state):
         raise HTTPException(status_code=400, detail="Invalid OAuth state")
+    user_id = request.session.pop("gmail_connect_user_id", None)
+    user = db.query(User).filter(User.id == user_id, User.status == "active").first()
+    if not user:
+        raise HTTPException(status_code=401, detail="Account connection session expired")
     flow = _gmail_flow(state)
     flow.fetch_token(code=code)
     credentials = flow.credentials
@@ -302,6 +360,8 @@ async def gmail_callback(
         .first()
     )
     if not account:
+        if owned_account_query(db, user).count() >= settings.max_accounts_per_user:
+            raise HTTPException(status_code=400, detail="Mail account limit reached")
         account = SMTPConfig(
             owner_user_id=user.id,
             provider="gmail",
@@ -327,7 +387,9 @@ async def gmail_callback(
         account.enabled = True
     db.commit()
     db.refresh(account)
-    return RedirectResponse(url=f"{settings.public_base_url.rstrip('/')}/dashboard?connected={account.id}")
+    return RedirectResponse(
+        url=f"{settings.public_base_url.rstrip('/')}?gmail_connected={account.id}"
+    )
 
 
 @router.get("/emails")

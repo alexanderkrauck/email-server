@@ -26,6 +26,20 @@ def test_download_token_is_bound_to_attachment_and_expiry_claim():
         verify_download_token(token[:-1] + ("A" if token[-1] != "A" else "B"), attachment_id=42)
 
 
+def test_account_connect_token_is_signed_and_user_bound():
+    from src.security.account_connect_tokens import (
+        issue_account_connect_token,
+        verify_account_connect_token,
+    )
+
+    token = issue_account_connect_token(user_id=7)
+
+    assert token.count(".") == 1
+    assert verify_account_connect_token(token) == 7
+    with pytest.raises(ValueError):
+        verify_account_connect_token(token[:-1] + ("A" if token[-1] != "A" else "B"))
+
+
 @pytest.mark.asyncio
 async def test_google_oauth_provider_emits_audience_bound_mcp_challenge():
     from fastmcp import FastMCP

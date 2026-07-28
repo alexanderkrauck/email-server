@@ -4,7 +4,9 @@ Status: implemented.
 
 ## Identity
 
-FastMCP's Google OAuth provider authenticates MCP clients. Google Identity Services creates browser sessions for the account dashboard. Both resolve users by the stable Google `sub` claim.
+FastMCP's Google OAuth provider authenticates MCP clients by the stable Google
+`sub` claim. Gmail provider consent is started from a short-lived, signed MCP URL
+that is bound to the authenticated local user.
 
 The first authenticated login can explicitly claim the legacy development owner by setting:
 
@@ -34,6 +36,9 @@ The connector is hand-authored rather than generated from FastAPI. It contains:
 
 ```text
 list_mail_accounts
+add_mail_account
+update_mail_account
+begin_gmail_connection
 search_mail
 search_mail_regex
 get_mail
@@ -42,7 +47,9 @@ get_attachment
 send_mail
 ```
 
-Account administration and synchronization controls are HTTP-only.
+Mailbox creation and non-secret configuration changes are owner-scoped MCP
+operations. Passwords are accepted only as write-only inputs. Deletion,
+standalone connection testing, and synchronization controls remain HTTP-only.
 
 ## Rollout
 

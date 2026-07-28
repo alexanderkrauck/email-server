@@ -7,8 +7,9 @@ Multi-user email sync, search, attachment retrieval, and sending through FastAPI
 - Google OpenID Connect identifies an application user by the stable Google `sub` claim.
 - Each user owns multiple Gmail, Zoho, or generic IMAP/SMTP accounts.
 - Mailbox credentials are separate from login identity and encrypted at rest.
-- Account administration is available only through the authenticated HTTP API and dashboard.
-- MCP exposes only seven mail operations and derives ownership from the authenticated token.
+- Account administration is available through the authenticated HTTP API and explicit MCP tools.
+- MCP derives ownership from the authenticated token; callers never supply an owner ID.
+- Mailbox passwords are write-only tool/API inputs and are never returned.
 - Original attachment binaries are not stored. A signed URL refetches them from the provider on demand.
 - Development mode is unauthenticated and must remain bound to loopback.
 
@@ -23,7 +24,6 @@ curl http://localhost:8002/api/v1/health
 
 Local endpoints:
 
-- Dashboard: `http://localhost:8002/dashboard`
 - HTTP API: `http://localhost:8002/api/v1`
 - MCP: `http://localhost:8002/mcp`
 - OpenAPI: `http://localhost:8002/api/v1/docs`
@@ -90,6 +90,9 @@ https://mail.example.com/api/v1/accounts/gmail/callback
 ## MCP Tools
 
 - `list_mail_accounts`
+- `add_mail_account`
+- `update_mail_account`
+- `begin_gmail_connection`
 - `search_mail`
 - `search_mail_regex`
 - `get_mail`
@@ -97,7 +100,10 @@ https://mail.example.com/api/v1/accounts/gmail/callback
 - `get_attachment`
 - `send_mail`
 
-Account creation, credential updates, deletion, connection tests, and manual sync are deliberately absent.
+`list_mail_accounts` includes non-secret connection settings and exact stored message counts.
+`add_mail_account` and `update_mail_account` accept write-only passwords for IMAP/SMTP
+accounts. `begin_gmail_connection` returns a five-minute signed URL for Google consent.
+Deletion, standalone connection tests, and manual sync remain outside the MCP surface.
 
 ## Account API
 

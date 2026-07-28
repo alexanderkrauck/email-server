@@ -12,6 +12,9 @@ async def test_mcp_tool_surface_is_narrow_and_annotated():
 
     assert names == {
         "list_mail_accounts",
+        "add_mail_account",
+        "update_mail_account",
+        "begin_gmail_connection",
         "search_mail",
         "search_mail_regex",
         "get_mail",
@@ -26,17 +29,30 @@ async def test_mcp_tool_surface_is_narrow_and_annotated():
     ).output_schema
     assert "total_message_count" in str(account_schema)
     assert "message_count" in str(account_schema)
+    assert "imap_host" in str(account_schema)
     send_annotations = next(tool for tool in tools if tool.name == "send_mail").annotations
     assert send_annotations.readOnlyHint is False
     assert send_annotations.openWorldHint is True
+    assert next(
+        tool for tool in tools if tool.name == "add_mail_account"
+    ).annotations.readOnlyHint is False
 
 
-def test_mcp_schemas_never_contain_password_fields():
+def test_password_is_write_only_in_account_tools():
     from src.server import mcp
     import asyncio
 
     tools = asyncio.run(mcp.list_tools())
-    schemas = " ".join(str(tool.parameters) for tool in tools).lower()
+    tools_by_name = {tool.name: tool for tool in tools}
+    password_inputs = {
+        name
+        for name, tool in tools_by_name.items()
+        if "password" in str(tool.parameters).lower()
+    }
+    output_schemas = " ".join(str(tool.output_schema) for tool in tools).lower()
+    input_schemas = " ".join(str(tool.parameters) for tool in tools).lower()
 
-    assert "password" not in schemas
-    assert "credential" not in schemas
+    assert password_inputs == {"add_mail_account", "update_mail_account"}
+    assert "credential_ciphertext" not in input_schemas
+    assert "password" not in output_schemas
+    assert "credential_ciphertext" not in output_schemas

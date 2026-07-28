@@ -43,6 +43,11 @@ router = APIRouter()
 email_sender_manager = EmailSenderManager()
 email_processor = EmailProcessor()
 CurrentUser = Annotated[User, Depends(get_current_user)]
+GMAIL_CONNECTION_SCOPES = (
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
+    GMAIL_MAIL_SCOPE,
+)
 
 
 class GoogleLoginInput(BaseModel):
@@ -321,7 +326,7 @@ def _gmail_flow(state: str | None = None):
     }
     flow = Flow.from_client_config(
         client_config,
-        scopes=["openid", "email", GMAIL_MAIL_SCOPE],
+        scopes=GMAIL_CONNECTION_SCOPES,
         state=state,
     )
     flow.redirect_uri = f"{settings.public_base_url.rstrip('/')}/api/v1/accounts/gmail/callback"
@@ -334,7 +339,8 @@ def _start_gmail_connection(request: Request, user: User) -> RedirectResponse:
     request.session["gmail_connect_user_id"] = user.id
     flow = _gmail_flow(state)
     authorization_url, _ = flow.authorization_url(
-        access_type="offline", prompt="consent", include_granted_scopes="true"
+        access_type="offline",
+        prompt="consent",
     )
     if not flow.code_verifier:
         raise HTTPException(
@@ -366,6 +372,17 @@ async def connect_gmail_from_mcp(
     return _start_gmail_connection(request, user)
 
 
+def _recover_gmail_scope_change(flow, warning: Warning) -> bool:
+    granted_scopes = set(getattr(warning, "new_scope", ()) or ())
+    token = getattr(warning, "token", None)
+    if not set(GMAIL_CONNECTION_SCOPES).issubset(granted_scopes):
+        return False
+    if not token or not token.get("access_token"):
+        return False
+    flow.oauth2session.token = dict(token)
+    return True
+
+
 @router.get("/accounts/gmail/callback")
 async def gmail_callback(
     request: Request,
@@ -390,6 +407,20 @@ async def gmail_callback(
     flow.code_verifier = code_verifier
     try:
         await asyncio.to_thread(flow.fetch_token, code=code)
+    except Warning as exc:
+        if not _recover_gmail_scope_change(flow, exc):
+            logger.warning(
+                "Gmail OAuth returned insufficient scopes for user %s",
+                user.id,
+            )
+            raise HTTPException(
+                status_code=400,
+                detail="Google did not grant all required Gmail permissions",
+            ) from None
+        logger.info(
+            "Accepted Gmail OAuth token with an expanded scope set for user %s",
+            user.id,
+        )
     except Exception as exc:
         logger.warning(
             "Gmail OAuth token exchange failed for user %s: %s",

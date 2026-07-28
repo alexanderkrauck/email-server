@@ -142,12 +142,15 @@ def test_dashboard_route_is_removed():
 def test_gmail_connection_stores_generated_pkce_verifier(monkeypatch):
     class FakeFlow:
         code_verifier = None
+        authorization_kwargs = None
 
         def authorization_url(self, **kwargs):
+            self.authorization_kwargs = kwargs
             self.code_verifier = "generated-code-verifier"
             return "https://accounts.google.test/authorize", "state"
 
-    monkeypatch.setattr(email_handler, "_gmail_flow", lambda state: FakeFlow())
+    flow = FakeFlow()
+    monkeypatch.setattr(email_handler, "_gmail_flow", lambda state: flow)
     request = SimpleNamespace(session={})
     user = SimpleNamespace(id=42)
 
@@ -156,6 +159,29 @@ def test_gmail_connection_stores_generated_pkce_verifier(monkeypatch):
     assert response.headers["location"] == "https://accounts.google.test/authorize"
     assert request.session["gmail_connect_user_id"] == 42
     assert request.session["gmail_oauth_code_verifier"] == "generated-code-verifier"
+    assert flow.authorization_kwargs == {
+        "access_type": "offline",
+        "prompt": "consent",
+    }
+
+
+def test_gmail_scope_change_recovery_requires_complete_scope_set():
+    token = {"access_token": "access-token", "scope": "expanded"}
+    warning = Warning("scope changed")
+    warning.token = token
+    warning.new_scope = [
+        *email_handler.GMAIL_CONNECTION_SCOPES,
+        "https://www.googleapis.com/auth/userinfo.profile",
+    ]
+    flow = SimpleNamespace(oauth2session=SimpleNamespace(token={}))
+
+    assert email_handler._recover_gmail_scope_change(flow, warning) is True
+    assert flow.oauth2session.token == token
+
+    warning.new_scope = [email_handler.GMAIL_MAIL_SCOPE]
+    flow.oauth2session.token = {}
+    assert email_handler._recover_gmail_scope_change(flow, warning) is False
+    assert flow.oauth2session.token == {}
 
 
 @pytest.mark.asyncio

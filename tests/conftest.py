@@ -5,9 +5,15 @@ from datetime import datetime, timezone
 
 import pytest
 
-os.environ["EMAILSERVER_DATABASE_URL"] = "postgresql://emailserver:emailserver@localhost:5432/emailserver_test"
-os.environ["EMAILSERVER_API_HOST"] = "0.0.0.0"
-os.environ["EMAILSERVER_API_PORT"] = "8000"
+current_database_url = os.environ.get("EMAILSERVER_DATABASE_URL", "")
+if "@postgres:" in current_database_url:
+    os.environ["EMAILSERVER_DATABASE_URL"] = current_database_url.rsplit("/", 1)[0] + "/emailserver_test"
+else:
+    os.environ["EMAILSERVER_DATABASE_URL"] = (
+        "postgresql://emailserver:emailserver@localhost:5432/emailserver_test"
+    )
+os.environ.setdefault("EMAILSERVER_API_HOST", "0.0.0.0")
+os.environ.setdefault("EMAILSERVER_API_PORT", "8000")
 
 
 @pytest.fixture
@@ -97,10 +103,14 @@ def mock_smtp_config():
         port: int = 993
         username: str = "testuser"
         password: str = "testpass"
+        credential_ciphertext: str = "testpass"
+        auth_type: str = "password"
         smtp_host: str = "smtp.example.com"
         smtp_port: int = 587
         enabled: bool = True
         imap_use_ssl: bool = True
         smtp_use_tls: bool = True
+        smtp_use_ssl: bool = False
+        sync_cursors: dict = None
 
     return MockSMTPConfig()

@@ -1,12 +1,14 @@
 """SMTP/IMAP client for connecting to email servers."""
 
 import contextlib
+import json
 import logging
 import re
 import ssl
 from datetime import datetime, timezone
+from email import policy
 from email import message_from_bytes
-from email.utils import parsedate_to_datetime
+from email.utils import getaddresses, parsedate_to_datetime
 from typing import Dict, List, Optional
 
 import aioimaplib
@@ -19,20 +21,39 @@ logger = logging.getLogger(__name__)
 class SMTPClient:
     """Client for connecting to SMTP/IMAP servers and fetching emails."""
 
-    CONNECTION_FIELDS = ("host", "port", "username", "password", "imap_use_ssl", "imap_use_tls")
+    CONNECTION_FIELDS = (
+        "host",
+        "port",
+        "username",
+        "credential_ciphertext",
+        "password",
+        "auth_type",
+        "imap_use_ssl",
+        "imap_use_tls",
+    )
 
     def __init__(self, smtp_config: SMTPConfig):
         self.config = smtp_config
         self.client = None
         self._connected = False
-        self._last_uids: Dict[str, int] = {}
-        self._uid_validities: Dict[str, int] = {}
+        cursors = getattr(smtp_config, "sync_cursors", {}) or {}
+        self._last_uids: Dict[str, int] = {
+            folder: state["last_uid"] for folder, state in cursors.items() if state.get("last_uid") is not None
+        }
+        self._uid_validities: Dict[str, int] = {
+            folder: state["uid_validity"] for folder, state in cursors.items() if state.get("uid_validity") is not None
+        }
 
     async def update_config(self, smtp_config: SMTPConfig):
         """Apply changed account settings and reconnect when required."""
         old_settings = tuple(getattr(self.config, field, None) for field in self.CONNECTION_FIELDS)
         new_settings = tuple(getattr(smtp_config, field, None) for field in self.CONNECTION_FIELDS)
         self.config = smtp_config
+        for folder, state in (getattr(smtp_config, "sync_cursors", {}) or {}).items():
+            if state.get("last_uid") is not None:
+                self._last_uids[folder] = max(self._last_uids.get(folder, 0), state["last_uid"])
+            if state.get("uid_validity") is not None:
+                self._uid_validities[folder] = state["uid_validity"]
 
         if old_settings != new_settings:
             await self.disconnect()
@@ -46,9 +67,8 @@ class SMTPClient:
 
             # Create SSL context
             ssl_context = ssl.create_default_context()
-            if not imap_use_ssl:
-                ssl_context.check_hostname = False
-                ssl_context.verify_mode = ssl.CERT_NONE
+            if not imap_use_ssl and not imap_use_tls:
+                raise ValueError("Plaintext IMAP is disabled; configure SSL or STARTTLS")
 
             # Connect to IMAP server
             if imap_use_ssl:
@@ -65,7 +85,15 @@ class SMTPClient:
                 await self.client.starttls(ssl_context=ssl_context)
 
             # Login
-            login_response = await self.client.login(self.config.username, self.config.password)
+            if getattr(self.config, "auth_type", "password") == "oauth2":
+                from src.security.provider_tokens import refresh_access_token
+
+                access_token = await asyncio.to_thread(
+                    refresh_access_token, self.config.credential_ciphertext
+                )
+                login_response = await self.client.xoauth2(self.config.username, access_token.encode())
+            else:
+                login_response = await self.client.login(self.config.username, self.config.password)
 
             if login_response.result == "OK":
                 self._connected = True
@@ -206,12 +234,17 @@ class SMTPClient:
         else:
             search_criteria = ("ALL",)
 
-        search_response = await self.client.search(*search_criteria)
+        if last_uid is not None:
+            search_response = await self.client.search("UID", f"{last_uid + 1}:*")
+        else:
+            search_response = await self.client.search(*search_criteria)
         if search_response.result != "OK":
             raise RuntimeError(f"Search failed in folder {folder} for {self.config.name}")
 
         message_ids = search_response.lines[0].decode().split()
         if not message_ids:
+            if uid_next is not None:
+                self._last_uids[folder] = max(0, uid_next - 1)
             logger.debug("No emails found in folder %s for %s", folder, self.config.name)
             return
 
@@ -231,14 +264,20 @@ class SMTPClient:
         highest_uid = last_uid
         for i, msg_id in enumerate(message_ids):
             try:
-                fetch_response = await self.client.fetch(msg_id, "(UID RFC822)")
+                fetch_response = await self.client.fetch(msg_id, "(UID FLAGS RFC822)")
                 if fetch_response.result == "OK":
-                    raw_email = fetch_response.lines[1]
+                    raw_email = self._extract_raw_email(fetch_response.lines)
                     message_uid = self._extract_message_uid(fetch_response.lines)
                     if last_uid is not None and message_uid is not None and message_uid <= last_uid:
                         logger.debug("Ignoring replayed UID %s in %s", message_uid, folder)
                         continue
-                    email_data = await self._parse_email(raw_email, str(message_uid or msg_id))
+                    email_data = await self._parse_email(
+                        raw_email,
+                        str(message_uid or msg_id),
+                        folder=folder,
+                        uid_validity=uid_validity,
+                        flags=self._extract_flags(fetch_response.lines),
+                    )
                     if email_data:
                         batch.append(email_data)
                     if message_uid is not None:
@@ -309,17 +348,54 @@ class SMTPClient:
                     return int(match.group(1))
         return None
 
-    async def _parse_email(self, raw_email: bytes, uid: str) -> Optional[Dict]:
+    @staticmethod
+    def _extract_flags(lines) -> str:
+        for line in lines:
+            if isinstance(line, bytes):
+                match = re.search(rb"\bFLAGS\s+\(([^)]*)\)", line)
+                if match:
+                    return match.group(1).decode("ascii", errors="ignore")
+        return ""
+
+    @staticmethod
+    def _extract_raw_email(lines) -> bytes:
+        candidates = [
+            bytes(line)
+            for line in lines
+            if isinstance(line, (bytes, bytearray))
+            and not re.match(rb"^\d+\s+\(", bytes(line))
+            and bytes(line) not in {b")", b"", b"Success"}
+        ]
+        if not candidates:
+            raise RuntimeError("IMAP FETCH returned no RFC822 payload")
+        return max(candidates, key=len)
+
+    async def _parse_email(
+        self,
+        raw_email: bytes,
+        uid: str,
+        *,
+        folder: str,
+        uid_validity: int | None,
+        flags: str = "",
+    ) -> Optional[Dict]:
         """Parse raw email data into structured format."""
         try:
-            msg = message_from_bytes(raw_email)
+            msg = message_from_bytes(raw_email, policy=policy.default)
 
             # Extract basic info
-            sender = msg.get("From", "")
-            recipient = msg.get("To", "")
-            subject = msg.get("Subject", "")
-            message_id = msg.get("Message-ID", f"uid_{uid}_{self.config.id}")
+            sender = str(msg.get("From", ""))
+            recipient = str(msg.get("To", ""))
+            subject = str(msg.get("Subject", ""))
+            message_id = str(msg.get("Message-ID", f"uid_{uid}_{self.config.id}"))
             date_str = msg.get("Date", "")
+            to_addresses = [address for _, address in getaddresses(msg.get_all("To", []))]
+            cc_addresses = [address for _, address in getaddresses(msg.get_all("Cc", []))]
+            bcc_addresses = [address for _, address in getaddresses(msg.get_all("Bcc", []))]
+            references = str(msg.get("References", ""))
+            in_reply_to = str(msg.get("In-Reply-To", ""))
+            reference_ids = re.findall(r"<[^>]+>", references)
+            provider_thread_id = reference_ids[0] if reference_ids else (in_reply_to or message_id)
 
             # Parse date
             email_date = None
@@ -336,22 +412,30 @@ class SMTPClient:
             if msg.is_multipart():
                 for part in msg.walk():
                     content_type = part.get_content_type()
-                    payload = part.get_payload(decode=True)
-                    if payload is None:
+                    if part.get_content_disposition() == "attachment":
                         continue
-                    if content_type == "text/plain":
-                        body_plain += payload.decode("utf-8", errors="ignore")
-                    elif content_type == "text/html":
-                        body_html += payload.decode("utf-8", errors="ignore")
+                    try:
+                        content = part.get_content()
+                    except Exception:
+                        payload = part.get_payload(decode=True)
+                        charset = part.get_content_charset() or "utf-8"
+                        content = payload.decode(charset, errors="replace") if payload else ""
+                    if content_type == "text/plain" and isinstance(content, str):
+                        body_plain += content
+                    elif content_type == "text/html" and isinstance(content, str):
+                        body_html += content
             else:
                 content_type = msg.get_content_type()
-                payload = msg.get_payload(decode=True)
-                if payload:
-                    decoded = payload.decode("utf-8", errors="ignore")
-                    if content_type == "text/plain":
-                        body_plain = decoded
-                    elif content_type == "text/html":
-                        body_html = decoded
+                try:
+                    decoded = msg.get_content()
+                except Exception:
+                    payload = msg.get_payload(decode=True)
+                    charset = msg.get_content_charset() or "utf-8"
+                    decoded = payload.decode(charset, errors="replace") if payload else ""
+                if content_type == "text/plain" and isinstance(decoded, str):
+                    body_plain = decoded
+                elif content_type == "text/html" and isinstance(decoded, str):
+                    body_html = decoded
 
             # Count attachments
             attachment_count = 0
@@ -366,6 +450,17 @@ class SMTPClient:
                 "recipient": recipient[:500],
                 "subject": subject,
                 "message_id": message_id,
+                "provider_message_id": f"{folder}:{uid_validity or 0}:{uid}",
+                "provider_thread_id": provider_thread_id[:768],
+                "folder": folder,
+                "imap_uid": int(uid) if uid.isdigit() else None,
+                "uid_validity": uid_validity,
+                "flags": flags,
+                "to_addresses": json.dumps(to_addresses),
+                "cc_addresses": json.dumps(cc_addresses),
+                "bcc_addresses": json.dumps(bcc_addresses),
+                "in_reply_to": in_reply_to[:255] or None,
+                "references": references or None,
                 "body_plain": body_plain,
                 "body_html": body_html,
                 "email_date": email_date,
@@ -377,3 +472,73 @@ class SMTPClient:
         except Exception as e:
             logger.error("Error parsing email from %s: %s", self.config.name, e)
             return None
+
+    async def fetch_raw_email(self, folder: str, uid: int, uid_validity: int | None = None) -> bytes:
+        """Refetch one original RFC822 message without retaining its binary."""
+        if not await self._ensure_connected():
+            raise ConnectionError(f"Could not connect to {self.config.name}")
+        selected = await self.client.select(f'"{folder}"')
+        if selected.result != "OK":
+            raise RuntimeError(f"Cannot select folder {folder}")
+        current_validity = self._extract_uid_validity(selected.lines)
+        if uid_validity and current_validity and uid_validity != current_validity:
+            raise RuntimeError("Mailbox UIDVALIDITY changed; attachment reference is stale")
+        response = await self.client.uid("FETCH", str(uid), "(BODY.PEEK[])")
+        if response.result != "OK":
+            raise RuntimeError("Original message is no longer available from the provider")
+        return self._extract_raw_email(response.lines)
+
+    async def fetch_raw_by_message_id(self, message_id: str) -> bytes:
+        """Resolve a legacy record that predates persisted UID provenance."""
+        if not await self._ensure_connected():
+            raise ConnectionError(f"Could not connect to {self.config.name}")
+        safe_message_id = message_id.replace('"', "")
+        for folder in await self._get_folders():
+            selected = await self.client.select(f'"{folder}"')
+            if selected.result != "OK":
+                continue
+            response = await self.client.search("HEADER", "Message-ID", f'"{safe_message_id}"')
+            if response.result != "OK" or not response.lines:
+                continue
+            sequence_ids = response.lines[0].decode("ascii", errors="ignore").split()
+            if not sequence_ids:
+                continue
+            fetched = await self.client.fetch(sequence_ids[-1], "(BODY.PEEK[])")
+            if fetched.result == "OK":
+                return self._extract_raw_email(fetched.lines)
+        raise RuntimeError("Original message is no longer available from the provider")
+
+    async def fetch_folder_state(self) -> dict[str, dict]:
+        """Fetch UID and flag state only, for deletion/read-state reconciliation."""
+        if not await self._ensure_connected():
+            raise ConnectionError(f"Could not connect to {self.config.name}")
+        snapshots = {}
+        for folder in await self._get_folders():
+            selected = await self.client.select(f'"{folder}"')
+            if selected.result != "OK":
+                continue
+            uid_validity = self._extract_uid_validity(selected.lines)
+            uids = set()
+            flags = {}
+            search = await self.client.search("ALL")
+            if search.result != "OK":
+                raise RuntimeError(f"Failed to list messages while reconciling {folder}")
+            sequence_ids = search.lines[0].decode("ascii", errors="ignore").split() if search.lines else []
+            # aioimaplib recursively parses untagged responses, so bound each metadata-only FETCH.
+            for start in range(0, len(sequence_ids), 200):
+                chunk = sequence_ids[start : start + 200]
+                if not chunk:
+                    continue
+                sequence_set = chunk[0] if len(chunk) == 1 else f"{chunk[0]}:{chunk[-1]}"
+                response = await self.client.fetch(sequence_set, "(UID FLAGS)")
+                if response.result != "OK":
+                    raise RuntimeError(f"Failed to reconcile folder state for {folder}")
+                for line in response.lines:
+                    if not isinstance(line, bytes):
+                        continue
+                    uid = self._extract_message_uid([line])
+                    if uid is not None:
+                        uids.add(uid)
+                        flags[uid] = self._extract_flags([line])
+            snapshots[folder] = {"uid_validity": uid_validity, "uids": uids, "flags": flags}
+        return snapshots

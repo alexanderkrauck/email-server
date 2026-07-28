@@ -1,12 +1,29 @@
 """Text extraction from various content types."""
 
+import asyncio
+import concurrent.futures
 import logging
+import resource
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from src.storage_config.resolver import StorageConfig
 
 logger = logging.getLogger(__name__)
+EXTRACTOR_VERSION = "2"
+
+
+def _limit_worker() -> None:
+    # Keep malformed documents from consuming the API container.
+    memory_limit = 512 * 1024 * 1024
+    resource.setrlimit(resource.RLIMIT_AS, (memory_limit, memory_limit))
+
+
+_EXTRACTION_POOL = concurrent.futures.ProcessPoolExecutor(max_workers=2, initializer=_limit_worker)
+
+
+def _extract_in_worker(data: bytes, content_type: str, config: "StorageConfig") -> str | None:
+    return TextExtractor()._extract_sync(data, content_type, config)
 
 
 class TextExtractor:
@@ -31,51 +48,49 @@ class TextExtractor:
 
         if not should_extract_text(config, content_type):
             return None
-
-        content_type_lower = content_type.lower()
-
-        try:
-            if content_type_lower == "text/plain":
-                return self._decode_utf8(data)
-            if content_type_lower in ("text/html", "application/xhtml+xml"):
-                return self._extract_html(data)
-            if content_type_lower == "text/csv":
-                return self._decode_utf8(data)
-            if content_type_lower == "text/xml":
-                return self._decode_utf8(data)
-            if content_type_lower == "application/json":
-                return self._decode_utf8(data)
-            if content_type_lower == "application/rtf":
-                return self._extract_rtf(data)
-            if content_type_lower == "application/pdf":
-                return self._extract_pdf(data)
-            if content_type_lower in (
-                "application/msword",
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            ):
-                return self._extract_docx(data)
-            if content_type_lower == "application/vnd.oasis.opendocument.text":
-                return self._extract_odt(data)
-            if content_type_lower in (
-                "application/vnd.ms-excel",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            ):
-                return self._extract_xlsx(data)
-            if content_type_lower == "application/vnd.oasis.opendocument.spreadsheet":
-                return self._extract_ods(data)
-            if content_type_lower in (
-                "application/vnd.ms-powerpoint",
-                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            ):
-                return self._extract_pptx(data)
-            if content_type_lower.startswith("image/"):
-                return self._extract_image_ocr(data, content_type_lower)
-            logger.debug("Unsupported content type for text extraction: %s", content_type)
+        if len(data) > config.max_attachment_size:
             return None
 
+        try:
+            from src.config import settings
+
+            loop = asyncio.get_running_loop()
+            future = loop.run_in_executor(_EXTRACTION_POOL, _extract_in_worker, data, content_type, config)
+            result = await asyncio.wait_for(future, timeout=settings.extraction_timeout_seconds)
+            return result[: settings.max_extracted_text_chars] if result else result
+        except TimeoutError:
+            logger.warning("Text extraction timed out for %s", content_type)
+            return None
         except Exception as e:
             logger.warning("Failed to extract text from %s: %s", content_type, e)
             return None
+
+    def _extract_sync(self, data: bytes, content_type: str, config: "StorageConfig") -> str | None:
+        content_type_lower = content_type.lower()
+        if content_type_lower == "text/plain":
+            return self._decode_utf8(data)
+        if content_type_lower in ("text/html", "application/xhtml+xml"):
+            return self._extract_html(data)
+        if content_type_lower in ("text/csv", "text/xml", "application/json"):
+            return self._decode_utf8(data)
+        if content_type_lower == "application/rtf":
+            return self._extract_rtf(data)
+        if content_type_lower == "application/pdf":
+            return self._extract_pdf(data)
+        if content_type_lower == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+            return self._extract_docx(data)
+        if content_type_lower == "application/vnd.oasis.opendocument.text":
+            return self._extract_odt(data)
+        if content_type_lower == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+            return self._extract_xlsx(data)
+        if content_type_lower == "application/vnd.oasis.opendocument.spreadsheet":
+            return self._extract_ods(data)
+        if content_type_lower == "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+            return self._extract_pptx(data)
+        if content_type_lower.startswith("image/"):
+            return self._extract_image_ocr(data, content_type_lower)
+        logger.debug("Unsupported or legacy content type for text extraction: %s", content_type)
+        return None
 
     def _decode_utf8(self, data: bytes) -> str:
         """Decode UTF-8 with fallback."""
@@ -114,8 +129,10 @@ class TextExtractor:
 
             import pypdf
 
+            from src.config import settings
+
             reader = pypdf.PdfReader(BytesIO(data))
-            text_parts = [page.extract_text() for page in reader.pages]
+            text_parts = [(page.extract_text() or "") for page in reader.pages[: settings.max_pdf_pages]]
             return "\n".join(text_parts)
         except Exception as e:
             logger.warning("PDF extraction failed: %s", e)
@@ -130,6 +147,12 @@ class TextExtractor:
 
             doc = docx.Document(BytesIO(data))
             text_parts = [para.text for para in doc.paragraphs]
+            for table in doc.tables:
+                for row in table.rows:
+                    text_parts.append("\t".join(cell.text for cell in row.cells))
+            for section in doc.sections:
+                text_parts.extend(para.text for para in section.header.paragraphs)
+                text_parts.extend(para.text for para in section.footer.paragraphs)
             return "\n".join(text_parts)
         except Exception as e:
             logger.warning("DOCX extraction failed: %s", e)

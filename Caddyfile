@@ -1,0 +1,4 @@
+{$EMAILSERVER_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy email-server:8000
+}

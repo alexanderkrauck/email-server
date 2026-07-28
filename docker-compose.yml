@@ -35,6 +35,11 @@ services:
       - EMAILSERVER_API_HOST=0.0.0.0
       - EMAILSERVER_API_PORT=8000
       - EMAILSERVER_LOG_LEVEL=INFO
+      - EMAILSERVER_AUTH_MODE=development
+      - EMAILSERVER_PUBLIC_BASE_URL=http://localhost:8002
+      - FASTMCP_HOME=/data/fastmcp
+    volumes:
+      - emaildata:/data
     restart: always
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
@@ -51,4 +56,6 @@ services:
 
 volumes:
   pgdata:
+    driver: local
+  emaildata:
     driver: local

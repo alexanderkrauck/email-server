@@ -1,127 +1,129 @@
 # Email Server
 
-Multi-account email sync and search service with PostgreSQL storage, FastAPI routes, attachment text extraction, and MCP integration.
+Multi-user email sync, search, attachment retrieval, and sending through FastAPI and an OAuth-protected MCP endpoint.
 
-This is an agent-infrastructure project: a local service that lets AI workflows search, inspect, and act on email through a structured API and MCP endpoint. It is not intended as a hosted SaaS product.
+## Security Model
 
-## Why I Built It
+- Google OpenID Connect identifies an application user by the stable Google `sub` claim.
+- Each user owns multiple Gmail, Zoho, or generic IMAP/SMTP accounts.
+- Mailbox credentials are separate from login identity and encrypted at rest.
+- Account administration is available only through the authenticated HTTP API and dashboard.
+- MCP exposes only seven mail operations and derives ownership from the authenticated token.
+- Original attachment binaries are not stored. A signed URL refetches them from the provider on demand.
+- Development mode is unauthenticated and must remain bound to loopback.
 
-Email is still where a lot of operational work happens. For agent workflows, raw IMAP access is awkward: messages are hard to search, attachment content is hidden, state is spread across folders, and tool calls become brittle.
+Google login does not grant access to arbitrary mailboxes. Gmail can be connected with a separate Gmail OAuth consent flow. Zoho and generic IMAP accounts use provider app passwords.
 
-This project turns email into structured local infrastructure:
-
-- sync email from IMAP accounts into PostgreSQL
-- store body text, HTML, metadata, and extracted attachment text
-- expose search and CRUD operations through FastAPI
-- expose email tools through MCP for AI workflows
-- support sending, replying, and forwarding through SMTP
-
-## Key Technical Points
-
-- FastAPI application with typed routes
-- PostgreSQL 16 storage
-- SQLAlchemy ORM models for accounts, emails, and attachments
-- Background sync loop for IMAP accounts
-- Attachment text extraction for PDF, DOCX, image OCR, and plaintext
-- MCP endpoint mounted at `/llm/mcp`
-- Docker Compose setup for local deployment
-- Tests for models, database behavior, attachment handling, and extraction utilities
-
-## Architecture
-
-```text
-email-server/
-├── docker-compose.yml
-├── Dockerfile
-├── src/
-│   ├── server.py              # FastAPI app and MCP setup
-│   ├── config.py              # Pydantic settings
-│   ├── handlers/              # API routes
-│   ├── models/                # SQLAlchemy models
-│   ├── database/              # engine/session initialization
-│   ├── email/                 # IMAP sync, SMTP sending, attachment extraction
-│   └── storage_config/        # account storage configuration
-├── scripts/                   # reset utilities
-└── tests/
-```
-
-## Quick Start
+## Local Development
 
 ```bash
-docker compose up -d
+docker compose up -d --build
 curl http://localhost:8002/api/v1/health
 ```
 
-Add an email account:
+Local endpoints:
 
-```bash
-curl -X POST http://localhost:8002/api/v1/smtp-configs \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Gmail",
-    "host": "imap.gmail.com",
-    "port": 993,
-    "username": "you@gmail.com",
-    "password": "your-app-password",
-    "smtp_host": "smtp.gmail.com",
-    "smtp_port": 587,
-    "imap_use_ssl": true,
-    "smtp_use_tls": true,
-    "enabled": true
-  }'
+- Dashboard: `http://localhost:8002/dashboard`
+- HTTP API: `http://localhost:8002/api/v1`
+- MCP: `http://localhost:8002/mcp`
+- OpenAPI: `http://localhost:8002/api/v1/docs`
+
+The development composition binds HTTP and SMTP to `127.0.0.1` and uses the migrated `development-owner` user.
+
+## Production Google Setup
+
+Create a Google OAuth Web application and configure:
+
+- Authorized JavaScript origin: `https://mail.example.com`
+- MCP callback: `https://mail.example.com/auth/callback`
+- Gmail connection callback: `https://mail.example.com/api/v1/accounts/gmail/callback`
+
+Create a private `.env`:
+
+```dotenv
+EMAILSERVER_DOMAIN=mail.example.com
+POSTGRES_PASSWORD=replace-with-a-long-random-value
+GOOGLE_CLIENT_ID=123.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=replace-me
+JWT_SIGNING_KEY=replace-with-a-long-random-value
+CREDENTIAL_ENCRYPTION_KEY=replace-with-a-long-random-value
+SESSION_SECRET=replace-with-a-long-random-value
+REGISTRATION_MODE=allowlist
+ALLOWED_GOOGLE_EMAILS=["owner@example.com","second-user@example.com"]
+ALLOWED_GOOGLE_SUBJECTS=[]
+CLAIM_LEGACY_ACCOUNTS_ON_FIRST_LOGIN=true
 ```
 
-Search synced email:
+Start the HTTPS deployment:
 
 ```bash
-curl "http://localhost:8002/api/v1/emails/search?query=invoice"
+docker compose -f docker-compose.production.yml up -d --build
 ```
 
-## API Surface
+Caddy obtains and renews TLS certificates. PostgreSQL, FastMCP OAuth state, signing material, and encrypted credential keys use persistent volumes or explicit deployment secrets.
 
-- `GET /api/v1/health`
-- `GET /api/v1/smtp-configs`
-- `POST /api/v1/smtp-configs`
-- `PUT /api/v1/smtp-configs/{id}`
-- `DELETE /api/v1/smtp-configs/{id}`
-- `POST /api/v1/smtp-configs/{id}/process`
-- `GET /api/v1/emails`
-- `GET /api/v1/emails/{id}`
+For the first production login after upgrading an existing installation, set `CLAIM_LEGACY_ACCOUNTS_ON_FIRST_LOGIN=true` and allowlist exactly the intended owner. After that user claims the existing accounts, set it back to `false`.
+
+## Claude Connection
+
+Add this remote MCP URL:
+
+```text
+https://mail.example.com/mcp
+```
+
+The server returns an OAuth challenge. Claude discovers the authorization metadata, registers its callback, redirects the user to Google, and then uses the FastMCP-issued audience-bound bearer token.
+
+The Google OAuth application must permit Claude's callback:
+
+```text
+https://claude.ai/api/mcp/auth_callback
+```
+
+## MCP Tools
+
+- `list_mail_accounts`
+- `search_mail`
+- `search_mail_regex`
+- `get_mail`
+- `get_thread`
+- `get_attachment`
+- `send_mail`
+
+Account creation, credential updates, deletion, connection tests, and manual sync are deliberately absent.
+
+## Account API
+
+Authenticated routes include:
+
+- `GET /api/v1/me`
+- `GET|POST /api/v1/accounts`
+- `GET|PATCH|DELETE /api/v1/accounts/{id}`
+- `POST /api/v1/accounts/{id}/test`
+- `POST /api/v1/accounts/{id}/sync`
+- `GET /api/v1/accounts/gmail/connect`
 - `GET /api/v1/emails/search`
-- `POST /api/v1/send-email`
-- `POST /api/v1/emails/{id}/reply`
-- `POST /api/v1/emails/{id}/forward`
+- `GET /api/v1/emails/search/regex`
+- `GET /api/v1/emails/{id}`
+- `GET /api/v1/attachments/{id}`
+- `POST /api/v1/send`
 
-Swagger UI:
+Every account, message, attachment, sync, and send lookup is owner-scoped.
 
-```text
-http://localhost:8002/api/v1/docs
+## Data And Synchronization
+
+- Alembic applies versioned, data-preserving migrations.
+- Message identity is unique by `(mail_account_id, provider_message_id)`; RFC `Message-ID` remains metadata.
+- IMAP cursors persist UID, UIDVALIDITY, and folder.
+- Periodic metadata-only reconciliation mirrors flags and upstream deletions.
+- PostgreSQL GIN indexes support lexical body and attachment search.
+- Regex is a separate bounded search with scope, pattern, result, and statement-time limits.
+- Send requests support idempotency keys and append an owner/account-scoped audit record.
+
+## Verification
+
+```bash
+pytest -q
 ```
 
-MCP endpoint:
-
-```text
-http://localhost:8002/llm/mcp
-```
-
-## Configuration
-
-Environment variables use the `EMAILSERVER_` prefix.
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `EMAILSERVER_DATABASE_URL` | `postgresql://emailserver:emailserver@postgres:5432/emailserver` | PostgreSQL connection string |
-| `EMAILSERVER_API_HOST` | `0.0.0.0` | API bind address |
-| `EMAILSERVER_API_PORT` | `8000` | API port |
-| `EMAILSERVER_LOG_LEVEL` | `INFO` | Log level |
-| `EMAILSERVER_EMAIL_CHECK_INTERVAL` | `30` | Sync interval in seconds |
-| `EMAILSERVER_MAX_ATTACHMENT_SIZE` | `10485760` | Max attachment size |
-| `EMAILSERVER_MCP_ENABLED` | `true` | Enable MCP endpoint |
-
-## Status
-
-Research/infrastructure project. Useful as a local component for agent workflows, not hardened as a public managed service.
-
-## Notes
-
-Use app passwords or dedicated test accounts. Do not commit real email credentials.
+The suite covers tenant isolation, tool exposure and annotations, encryption, token tampering, attachment limits, IMAP cursor behavior, and OAuth challenge metadata.

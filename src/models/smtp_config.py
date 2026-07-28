@@ -1,25 +1,31 @@
-"""SMTP Configuration model."""
+"""Mail account configuration model."""
 
-from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
 from .base import Base
 
 
 class SMTPConfig(Base):
-    """SMTP server configuration model."""
+    """An IMAP/SMTP mailbox owned by one application user."""
 
     __tablename__ = "smtp_configs"
+    __table_args__ = (UniqueConstraint("owner_user_id", "name", name="uq_mail_account_owner_name"),)
 
     id = Column(Integer, primary_key=True)
-    name = Column(String(255), unique=True, nullable=False)
+    owner_user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    provider = Column(String(32), nullable=False, default="imap")
+    auth_type = Column(String(32), nullable=False, default="password")
+    provider_account_id = Column(String(255), nullable=True)
+    name = Column(String(255), nullable=False)
     account_name = Column(String(255), nullable=True)  # For organizing storage by account
     host = Column(String(255), nullable=False)  # IMAP host
     port = Column(Integer, nullable=False, default=993)  # IMAP port
     smtp_host = Column(String(255), nullable=True)  # SMTP host (if different from IMAP)
     smtp_port = Column(Integer, nullable=False, default=465)  # SMTP port
     username = Column(String(255), nullable=False)
-    password = Column(Text, nullable=False)  # Should be encrypted in production
+    credential_ciphertext = Column(Text, nullable=False)
     # IMAP settings
     imap_use_ssl = Column(Boolean, default=True)  # IMAP typically uses SSL on 993
     imap_use_tls = Column(Boolean, default=False)
@@ -44,6 +50,24 @@ class SMTPConfig(Base):
     # Stats
     last_check = Column(DateTime, nullable=True)
     total_emails_processed = Column(Integer, default=0)
+    sync_locked_at = Column(DateTime, nullable=True)
+
+    owner = relationship("User", back_populates="mail_accounts")
+    emails = relationship("EmailLog", back_populates="mail_account")
+    sync_cursors = relationship("MailSyncCursor", back_populates="mail_account", cascade="all, delete-orphan")
+
+    @property
+    def password(self) -> str:
+        """Decrypt the provider credential only at the connection boundary."""
+        from src.security.crypto import decrypt_secret
+
+        return decrypt_secret(self.credential_ciphertext)
+
+    @password.setter
+    def password(self, value: str) -> None:
+        from src.security.crypto import encrypt_secret
+
+        self.credential_ciphertext = encrypt_secret(value)
 
     def __repr__(self):
         return f"<SMTPConfig(name='{self.name}', host='{self.host}', enabled={self.enabled})>"
@@ -52,6 +76,8 @@ class SMTPConfig(Base):
         """Convert to dictionary with proper datetime serialization."""
         return {
             "id": self.id,
+            "provider": self.provider,
+            "auth_type": self.auth_type,
             "name": self.name,
             "account_name": self.account_name,
             "host": self.host,
@@ -85,6 +111,9 @@ class SMTPConfig(Base):
 
         detached = DetachedConfig()
         detached.id = config.id
+        detached.owner_user_id = config.owner_user_id
+        detached.provider = config.provider
+        detached.auth_type = config.auth_type
         detached.name = config.name
         detached.account_name = config.account_name
         detached.host = config.host
@@ -92,6 +121,7 @@ class SMTPConfig(Base):
         detached.smtp_host = config.smtp_host
         detached.smtp_port = config.smtp_port
         detached.username = config.username
+        detached.credential_ciphertext = config.credential_ciphertext
         detached.password = config.password
         detached.imap_use_ssl = config.imap_use_ssl
         detached.imap_use_tls = config.imap_use_tls
@@ -104,4 +134,8 @@ class SMTPConfig(Base):
         detached.extract_docx_text_override = config.extract_docx_text_override
         detached.extract_image_text_override = config.extract_image_text_override
         detached.extract_other_text_override = config.extract_other_text_override
+        detached.sync_cursors = {
+            cursor.folder: {"uid_validity": cursor.uid_validity, "last_uid": cursor.last_uid}
+            for cursor in config.sync_cursors
+        }
         return detached

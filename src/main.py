@@ -26,7 +26,7 @@ def run_server():
     db_display = settings.database_url.split("@")[-1] if "@" in settings.database_url else settings.database_url
     logger.info("Database: %s", db_display)
     logger.info("HTTP API available at: /api/v1")
-    logger.info("MCP endpoint available at: /llm/mcp")
+    logger.info("MCP endpoint available at: /mcp")
     logger.info("API Documentation available at: /api/v1/docs")
 
     uvicorn.run(

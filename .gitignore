@@ -24,8 +24,10 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+.pytest_cache/
+.coverage
 
-# Virtual environments
+# Virtual environments and secrets
 .env
 .venv
 env/
@@ -54,13 +56,11 @@ Thumbs.db
 *.log
 logs/
 
-# Database
+# Database and backups
 *.db
 *.sqlite
 *.sqlite3
-
-# Docker
-.dockerignore
+*.dump
 
 # Temporary files
 *.tmp

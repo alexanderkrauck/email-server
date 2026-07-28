@@ -3,9 +3,9 @@
 import re
 
 
-def sanitize_db_text(value: str) -> str:
+def sanitize_db_text(value: str | None) -> str:
     """Remove characters PostgreSQL cannot store in text fields."""
-    return value.replace("\x00", "")
+    return (value or "").replace("\x00", "")
 
 
 def sanitize_filename(filename: str) -> str:

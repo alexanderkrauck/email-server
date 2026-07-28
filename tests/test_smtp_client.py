@@ -138,6 +138,15 @@ async def test_fetch_folder_uses_date_then_uid_checkpoint(mock_smtp_config, samp
     assert smtp_client.client.fetch.await_count == 2
 
 
+def test_extract_raw_email_accepts_bytearray_payload():
+    from src.email.smtp_client import SMTPClient
+
+    raw = bytearray(b"From: sender@example.com\r\n\r\nbody")
+    lines = [b"1 FETCH (BODY[] {32}", raw, b")", b"Success"]
+
+    assert SMTPClient._extract_raw_email(lines) == bytes(raw)
+
+
 @pytest.mark.asyncio
 async def test_fetch_error_does_not_advance_uid_checkpoint(mock_smtp_config):
     """An interrupted folder is retried from its prior checkpoint."""

@@ -1,0 +1,62 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: emailserver
+      POSTGRES_USER: emailserver
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U emailserver"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: always
+
+  email-server:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      EMAILSERVER_DATABASE_URL: postgresql://emailserver:${POSTGRES_PASSWORD}@postgres:5432/emailserver
+      EMAILSERVER_AUTH_MODE: google
+      EMAILSERVER_PUBLIC_BASE_URL: https://${EMAILSERVER_DOMAIN}
+      EMAILSERVER_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:?Set GOOGLE_CLIENT_ID}
+      EMAILSERVER_GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:?Set GOOGLE_CLIENT_SECRET}
+      EMAILSERVER_JWT_SIGNING_KEY: ${JWT_SIGNING_KEY:?Set JWT_SIGNING_KEY}
+      EMAILSERVER_CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?Set CREDENTIAL_ENCRYPTION_KEY}
+      EMAILSERVER_SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET}
+      EMAILSERVER_REGISTRATION_MODE: ${REGISTRATION_MODE:-allowlist}
+      EMAILSERVER_ALLOWED_GOOGLE_EMAILS: ${ALLOWED_GOOGLE_EMAILS:-[]}
+      EMAILSERVER_ALLOWED_GOOGLE_SUBJECTS: ${ALLOWED_GOOGLE_SUBJECTS:-[]}
+      EMAILSERVER_CLAIM_LEGACY_ACCOUNTS_ON_FIRST_LOGIN: ${CLAIM_LEGACY_ACCOUNTS_ON_FIRST_LOGIN:-false}
+      FASTMCP_HOME: /data/fastmcp
+    volumes:
+      - emaildata:/data
+    expose:
+      - "8000"
+    restart: always
+
+  caddy:
+    image: caddy:2-alpine
+    depends_on:
+      - email-server
+    environment:
+      EMAILSERVER_DOMAIN: ${EMAILSERVER_DOMAIN:?Set EMAILSERVER_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: always
+
+volumes:
+  pgdata:
+  emaildata:
+  caddy_data:
+  caddy_config:

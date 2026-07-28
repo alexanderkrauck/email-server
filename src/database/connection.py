@@ -2,7 +2,10 @@
 
 import logging
 from contextlib import contextmanager
+from pathlib import Path
 
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -52,11 +55,16 @@ def get_db_session():
 
 
 def init_database():
-    """Initialize database tables."""
-    # Import all models to ensure they're registered
-    from src.models import attachment, email, smtp_config  # noqa: F401
-    from src.models.base import Base
+    """Apply versioned schema migrations and encrypt legacy credentials."""
+    project_root = Path(__file__).resolve().parents[2]
+    alembic_config = Config(str(project_root / "alembic.ini"))
+    alembic_config.set_main_option("script_location", str(project_root / "alembic"))
+    alembic_config.set_main_option("sqlalchemy.url", settings.database_url.replace("%", "%%"))
+    command.upgrade(alembic_config, "head")
 
-    # Create all tables
-    Base.metadata.create_all(bind=engine)
-    logger.info("Database initialized successfully")
+    from src.security.crypto import rotate_plaintext_credentials
+
+    rotated = rotate_plaintext_credentials()
+    if rotated:
+        logger.info("Encrypted %s legacy mailbox credentials", rotated)
+    logger.info("Database migrations applied successfully")

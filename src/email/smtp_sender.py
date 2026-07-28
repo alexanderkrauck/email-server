@@ -3,11 +3,13 @@
 import logging
 import smtplib
 import ssl
+import base64
 from datetime import datetime, timezone
 from email import encoders
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.utils import make_msgid
 from typing import Dict, List, Optional, Union
 
 from src.database.connection import get_db_session
@@ -36,8 +38,12 @@ class EmailSender:
 
             if smtp_use_ssl:
                 # Use SSL connection (typically port 465)
-                self._server = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=10)
+                self._server = smtplib.SMTP_SSL(
+                    smtp_host, smtp_port, timeout=10, context=ssl.create_default_context()
+                )
             else:
+                if not smtp_use_tls:
+                    raise ValueError("Plaintext SMTP is disabled; configure SSL or STARTTLS")
                 # Use regular connection with optional TLS (typically port 587)
                 self._server = smtplib.SMTP(smtp_host, smtp_port, timeout=10)
                 if smtp_use_tls:
@@ -45,7 +51,17 @@ class EmailSender:
                     self._server.starttls(context=context)
 
             # Login
-            self._server.login(self.config.username, self.config.password)
+            if getattr(self.config, "auth_type", "password") == "oauth2":
+                from src.security.provider_tokens import refresh_access_token
+
+                token = refresh_access_token(self.config.credential_ciphertext)
+                auth = f"user={self.config.username}\x01auth=Bearer {token}\x01\x01"
+                encoded = base64.b64encode(auth.encode()).decode()
+                code, response = self._server.docmd("AUTH", f"XOAUTH2 {encoded}")
+                if code != 235:
+                    raise smtplib.SMTPAuthenticationError(code, response)
+            else:
+                self._server.login(self.config.username, self.config.password)
             logger.info("Connected to SMTP server %s", self.config.name)
             return True
 
@@ -110,6 +126,7 @@ class EmailSender:
             msg["To"] = ", ".join(to_addresses)
             msg["Subject"] = subject
             msg["Date"] = datetime.now(tz=timezone.utc).strftime("%a, %d %b %Y %H:%M:%S +0000")
+            msg["Message-ID"] = make_msgid(domain=from_email.split("@")[-1])
 
             if cc_addresses:
                 msg["Cc"] = ", ".join(cc_addresses)
@@ -166,7 +183,22 @@ class EmailSender:
                 all_recipients.extend(bcc_addresses)
 
             # Send email
-            self._server.send_message(msg, to_addrs=all_recipients)
+            refused = self._server.send_message(msg, to_addrs=all_recipients)
+            if refused:
+                refused_addresses = sorted(refused)
+                logger.error(
+                    "SMTP partially refused %s of %s recipients via %s",
+                    len(refused_addresses),
+                    len(all_recipients),
+                    self.config.name,
+                )
+                return {
+                    "success": False,
+                    "message": "SMTP accepted only part of the recipient set",
+                    "delivery_state": "partial",
+                    "message_id": msg["Message-ID"],
+                    "refused_recipients": refused_addresses,
+                }
 
             recipient_count = len(all_recipients)
             logger.info("Email sent successfully to %s recipients via %s", recipient_count, self.config.name)
@@ -176,12 +208,19 @@ class EmailSender:
                 "message": f"Email sent to {recipient_count} recipients",
                 "recipients": recipient_count,
                 "smtp_server": self.config.name,
+                "message_id": msg["Message-ID"],
+                "delivery_state": "sent",
             }
 
+        except (TimeoutError, smtplib.SMTPServerDisconnected) as e:
+            error_msg = f"SMTP result is ambiguous via {self.config.name}: {e}"
+            logger.error(error_msg)
+            self.disconnect()
+            return {"success": False, "message": error_msg, "delivery_state": "unknown"}
         except Exception as e:
             error_msg = f"Failed to send email via {self.config.name}: {e}"
             logger.error(error_msg)
-            return {"success": False, "message": error_msg}
+            return {"success": False, "message": error_msg, "delivery_state": "failed"}
 
     async def send_template_email(
         self, template_name: str, to_addresses: List[str], template_data: Dict, subject: Optional[str] = None, **kwargs
@@ -242,18 +281,47 @@ class EmailSenderManager:
 
     async def get_sender(self, smtp_config: SMTPConfig) -> EmailSender:
         """Get or create email sender for config."""
-        sender_key = f"{smtp_config.id}_{smtp_config.host}"
+        sender_key = smtp_config.id
 
         if sender_key not in self._senders:
             self._senders[sender_key] = EmailSender(smtp_config)
+        else:
+            sender = self._senders[sender_key]
+            old_connection = (
+                sender.config.smtp_host,
+                sender.config.smtp_port,
+                sender.config.username,
+                sender.config.credential_ciphertext,
+                sender.config.auth_type,
+            )
+            new_connection = (
+                smtp_config.smtp_host,
+                smtp_config.smtp_port,
+                smtp_config.username,
+                smtp_config.credential_ciphertext,
+                smtp_config.auth_type,
+            )
+            if old_connection != new_connection:
+                sender.disconnect()
+            sender.config = smtp_config
 
         return self._senders[sender_key]
 
-    async def send_email_via_config(self, smtp_config_id: int, **email_args) -> Dict[str, Union[bool, str]]:
+    async def invalidate(self, smtp_config_id: int) -> None:
+        sender = self._senders.pop(smtp_config_id, None)
+        if sender:
+            sender.disconnect()
+
+    async def send_email_via_config(
+        self, smtp_config_id: int, owner_user_id: int | None = None, **email_args
+    ) -> Dict[str, Union[bool, str]]:
         """Send email using specific SMTP configuration."""
         try:
             with get_db_session() as db:
-                config = db.query(SMTPConfig).filter(SMTPConfig.id == smtp_config_id).first()
+                query = db.query(SMTPConfig).filter(SMTPConfig.id == smtp_config_id)
+                if owner_user_id is not None:
+                    query = query.filter(SMTPConfig.owner_user_id == owner_user_id)
+                config = query.first()
                 if not config:
                     return {"success": False, "message": f"SMTP config {smtp_config_id} not found"}
 

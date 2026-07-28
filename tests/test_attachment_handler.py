@@ -120,6 +120,8 @@ async def test_process_attachment_creates_db_object():
     assert attachment.content_type == "text/plain"
     assert attachment.size == len(b"Hello, this is test content.")
     assert attachment.email_log_id == 1
+    assert attachment.sha256 is not None
+    assert attachment.extraction_state == "complete"
     # text_content should be populated for text/plain
     assert attachment.text_content is not None
 
@@ -148,6 +150,32 @@ async def test_process_attachment_removes_nul_characters():
     attachment = await handler._process_attachment(mock_part, 1, storage_config)
 
     assert attachment.text_content == "beforeafter"
+
+
+@pytest.mark.asyncio
+async def test_oversized_attachment_is_not_parsed():
+    from src.email.attachment_handler import AttachmentHandler
+    from src.storage_config.resolver import StorageConfig
+
+    handler = AttachmentHandler()
+    part = MagicMock()
+    part.get_filename.return_value = "large.txt"
+    part.get_content_type.return_value = "text/plain"
+    part.get.return_value = ""
+    part.get_payload.return_value = b"too large"
+    config = StorageConfig(
+        store_text_only=False,
+        max_attachment_size=4,
+        extract_pdf_text=True,
+        extract_docx_text=True,
+        extract_image_text=True,
+        extract_other_text=True,
+    )
+
+    attachment = await handler._process_attachment(part, 1, config)
+
+    assert attachment.extraction_state == "skipped_size"
+    assert attachment.text_content is None
 
 
 @pytest.mark.asyncio

@@ -213,3 +213,9 @@ This is the attachment content.
     # Text content stored in DB column, not on filesystem
     assert attachments[0].text_content is not None
     assert "attachment content" in attachments[0].text_content
+
+
+def test_attachment_filename_removes_header_control_characters():
+    from src.email import sanitize_filename
+
+    assert sanitize_filename("report\r\n folded.pdf") == "report_folded.pdf"

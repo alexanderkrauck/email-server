@@ -67,6 +67,8 @@ async def test_create_and_update_never_return_password(account_db, monkeypatch):
     account_db.refresh(account)
     assert account.host == "imap2.example.com"
     assert account.password == "rotated-secret"
+    assert account.sync_state == "pending"
+    assert account.backfill_complete is False
     assert "rotated-secret" not in str(updated)
     assert "password" not in updated
     assert "credential_ciphertext" not in updated

@@ -1,6 +1,6 @@
 """Persistent IMAP folder synchronization cursor."""
 
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -16,6 +16,7 @@ class MailSyncCursor(Base):
     folder = Column(String(500), nullable=False)
     uid_validity = Column(Integer, nullable=True)
     last_uid = Column(Integer, nullable=True)
+    backfill_complete = Column(Boolean, nullable=False, default=False)
     last_success_at = Column(DateTime, nullable=True)
     last_error = Column(Text, nullable=True)
     updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())

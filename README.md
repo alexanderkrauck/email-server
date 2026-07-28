@@ -87,6 +87,26 @@ https://mail.example.com/auth/callback
 https://mail.example.com/api/v1/accounts/gmail/callback
 ```
 
+## ChatGPT Connection
+
+Add the same remote MCP URL:
+
+```text
+https://mail.example.com/mcp
+```
+
+ChatGPT publishes connector-specific client metadata and uses a callback shaped
+like:
+
+```text
+https://chatgpt.com/connector/oauth/<connector-id>
+```
+
+The server allows only that path under `chatgpt.com`. Do not add this callback
+to the Google OAuth client. Google still redirects to the server-owned
+`https://mail.example.com/auth/callback`; FastMCP then redirects the completed
+authorization back to ChatGPT.
+
 ## MCP Tools
 
 - `list_mail_accounts`
@@ -104,6 +124,19 @@ https://mail.example.com/api/v1/accounts/gmail/callback
 `add_mail_account` and `update_mail_account` accept write-only passwords for IMAP/SMTP
 accounts. `begin_gmail_connection` returns a five-minute signed URL for Google consent.
 Deletion, standalone connection tests, and manual sync remain outside the MCP surface.
+
+`search_mail` and `search_mail_regex` return `total_count`, `raw_count`,
+`returned_count`, `has_more`, and a signed `next_cursor`. Reuse the same filters
+with `next_cursor` until `has_more` is false for an exhaustive result. The
+default `exact` deduplication groups equal RFC `Message-ID` values while
+retaining every source account and message ID; `mirror` additionally groups
+normalized body copies, and `none` returns every stored row.
+
+Search responses also report matching fields, participant-domain facets, and
+per-account sync coverage. `get_mail` and `get_thread` return bounded plain text
+by default; HTML must be requested explicitly. `send_mail` accepts owned
+`attachment_ids` and refetches each original binary from its provider before
+sending.
 
 ## Account API
 
@@ -128,9 +161,16 @@ Every account, message, attachment, sync, and send lookup is owner-scoped.
 - Alembic applies versioned, data-preserving migrations.
 - Message identity is unique by `(mail_account_id, provider_message_id)`; RFC `Message-ID` remains metadata.
 - IMAP cursors persist UID, UIDVALIDITY, and folder.
+- IMAP backfills are oldest-first and bounded per account cycle. A cursor moves
+  only after its batch commits, and a UIDVALIDITY change resets that folder
+  without comparing unrelated UID sequences.
 - OAuth Gmail accounts use `messages.list/get` for resumable backfill and `history.list` for incremental changes.
 - Expired Gmail history IDs trigger a generation-marked full sync before upstream deletions are reconciled.
-- Periodic metadata-only reconciliation mirrors flags and upstream deletions.
+- Periodic metadata-only reconciliation mirrors flags and upstream deletions;
+  its durable checkpoint prevents a full metadata scan after every restart.
+- Account work is bounded by a global concurrency limit and protected by
+  expiring database leases, so multiple workers cannot sync one mailbox at the
+  same time and a crashed worker cannot hold a permanent lock.
 - PostgreSQL GIN indexes support lexical body and attachment search.
 - Regex is a separate bounded search with scope, pattern, result, and statement-time limits.
 - Send requests support idempotency keys and append an owner/account-scoped audit record.
@@ -139,6 +179,7 @@ Every account, message, attachment, sync, and send lookup is owner-scoped.
 
 ```bash
 pytest -q
+python -m scripts.verify_postgres_search
 ```
 
 The suite covers tenant isolation, tool exposure and annotations, encryption, token tampering, attachment limits, IMAP cursor behavior, Gmail history behavior, and OAuth challenge metadata.

@@ -50,3 +50,43 @@ async def test_plaintext_smtp_transport_is_rejected():
     )
 
     assert await EmailSender(config).connect() is False
+
+
+@pytest.mark.asyncio
+async def test_invalid_attachment_is_not_silently_omitted(monkeypatch):
+    from src.email.smtp_sender import EmailSender, MIMEBase
+
+    original_add_header = MIMEBase.add_header
+
+    def reject_header(self, name, *args, **kwargs):
+        if name == "Content-Disposition":
+            raise ValueError("invalid attachment header")
+        return original_add_header(self, name, *args, **kwargs)
+
+    monkeypatch.setattr(
+        "src.email.smtp_sender.MIMEBase.add_header",
+        reject_header,
+    )
+
+    config = SimpleNamespace(
+        id=1,
+        name="Test",
+        account_name="sender@example.com",
+        username="sender@example.com",
+    )
+    sender = EmailSender(config)
+    sender._server = MagicMock()
+
+    result = await sender.send_email(
+        to_addresses=["recipient@example.com"],
+        subject="Test",
+        body_text="Body",
+        attachments=[{"filename": "report.pdf", "data": b"%PDF-test"}],
+    )
+
+    assert result == {
+        "success": False,
+        "message": "Failed to construct an outbound attachment",
+        "delivery_state": "failed",
+    }
+    sender._server.send_message.assert_not_called()

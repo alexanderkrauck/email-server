@@ -166,6 +166,108 @@ async def test_fetch_error_does_not_advance_uid_checkpoint(mock_smtp_config):
 
 
 @pytest.mark.asyncio
+async def test_bounded_backfill_fetches_oldest_uids_without_skipping(
+    mock_smtp_config,
+    sample_raw_email,
+):
+    from src.email.smtp_client import SMTPClient
+
+    smtp_client = SMTPClient(mock_smtp_config)
+    smtp_client.client = AsyncMock()
+    smtp_client.client.select.side_effect = [
+        SimpleNamespace(
+            result="OK",
+            lines=[
+                b"* OK [UIDVALIDITY 123] UIDs valid",
+                b"* OK [UIDNEXT 13] Predicted next UID",
+            ],
+        ),
+        SimpleNamespace(
+            result="OK",
+            lines=[
+                b"* OK [UIDVALIDITY 123] UIDs valid",
+                b"* OK [UIDNEXT 13] Predicted next UID",
+            ],
+        ),
+    ]
+    smtp_client.client.search.side_effect = [
+        SimpleNamespace(result="OK", lines=[b"1 2 3"]),
+        SimpleNamespace(result="OK", lines=[b"3"]),
+    ]
+    smtp_client.client.fetch.side_effect = [
+        SimpleNamespace(
+            result="OK",
+            lines=[b"1 FETCH (UID 10 RFC822 {100}", sample_raw_email, b")"],
+        ),
+        SimpleNamespace(
+            result="OK",
+            lines=[b"2 FETCH (UID 11 RFC822 {100}", sample_raw_email, b")"],
+        ),
+        SimpleNamespace(
+            result="OK",
+            lines=[b"3 FETCH (UID 12 RFC822 {100}", sample_raw_email, b")"],
+        ),
+    ]
+
+    first = [
+        batch async for batch in smtp_client._fetch_folder("INBOX", limit=2)
+    ]
+    assert [message["imap_uid"] for message in first[0]] == [10, 11]
+    assert smtp_client._last_uids["INBOX"] == 11
+    assert smtp_client._folder_backfill_complete["INBOX"] is False
+
+    second = [batch async for batch in smtp_client._fetch_folder("INBOX", limit=2)]
+    assert [message["imap_uid"] for message in second[0]] == [12]
+    assert smtp_client.client.search.await_args_list[1].args == ("UID", "12:*")
+    assert smtp_client._last_uids["INBOX"] == 12
+    assert smtp_client._folder_backfill_complete["INBOX"] is True
+
+
+@pytest.mark.asyncio
+async def test_uidvalidity_change_resets_folder_backfill(
+    mock_smtp_config,
+    sample_raw_email,
+):
+    from src.email.smtp_client import SMTPClient
+
+    mock_smtp_config.sync_cursors = {
+        "INBOX": {
+            "uid_validity": 100,
+            "last_uid": 50,
+            "backfill_complete": True,
+        }
+    }
+    smtp_client = SMTPClient(mock_smtp_config)
+    smtp_client.client = AsyncMock()
+    smtp_client.client.select.return_value = SimpleNamespace(
+        result="OK",
+        lines=[
+            b"* OK [UIDVALIDITY 200] UIDs valid",
+            b"* OK [UIDNEXT 3] Predicted next UID",
+        ],
+    )
+    smtp_client.client.search.return_value = SimpleNamespace(
+        result="OK",
+        lines=[b"1 2"],
+    )
+    smtp_client.client.fetch.side_effect = [
+        SimpleNamespace(
+            result="OK",
+            lines=[b"1 FETCH (UID 1 RFC822 {100}", sample_raw_email, b")"],
+        ),
+    ]
+
+    batches = [
+        batch async for batch in smtp_client._fetch_folder("INBOX", limit=1)
+    ]
+
+    assert batches[0][0]["imap_uid"] == 1
+    assert smtp_client.client.search.await_args.args == ("ALL",)
+    assert smtp_client._last_uids["INBOX"] == 1
+    assert smtp_client._folder_backfill_complete["INBOX"] is False
+
+
+@pytest.mark.asyncio
 async def test_login_failure_uses_response_lines(mock_smtp_config):
     """Non-OK login responses do not assume a removed response.data field."""
     from src.email.smtp_client import SMTPClient

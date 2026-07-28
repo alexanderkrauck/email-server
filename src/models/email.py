@@ -36,6 +36,7 @@ class EmailLog(Base):
     flags = Column(Text, nullable=True)
     in_reply_to = Column(String(255), nullable=True)
     references = Column(Text, nullable=True)
+    content_fingerprint = Column(String(32), nullable=True, index=True)
     deleted_at = Column(DateTime, nullable=True)
     last_seen_sync_generation = Column(Integer, nullable=True)
 
@@ -48,6 +49,11 @@ class EmailLog(Base):
     attachment_count = Column(Integer, default=0)
 
     attachments = relationship("EmailAttachment", back_populates="email_log", cascade="all, delete-orphan")
+    participants = relationship(
+        "MailParticipant",
+        back_populates="email_log",
+        cascade="all, delete-orphan",
+    )
     mail_account = relationship("SMTPConfig", back_populates="emails")
 
     def __repr__(self):

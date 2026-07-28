@@ -1,12 +1,12 @@
 """Email processing and orchestration."""
 
 import asyncio
-import contextlib
 import logging
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import List
 
-from sqlalchemy import func
+from sqlalchemy import or_
 
 from src.database.connection import SessionLocal, get_db_session
 from src.email import sanitize_db_text
@@ -14,7 +14,9 @@ from src.email.gmail_api_client import GmailApiClient, GmailHistoryExpired
 from src.email.smtp_client import SMTPClient
 from src.email.text_extractor import TextExtractor
 from src.models.email import EmailLog
+from src.models.participant import MailParticipant
 from src.models.smtp_config import SMTPConfig
+from src.services.message_metadata import content_fingerprint, participant_models
 
 logger = logging.getLogger(__name__)
 
@@ -25,9 +27,7 @@ class EmailProcessor:
     def __init__(self):
         self.active_clients = {}
         self.processing = False
-        self._last_reconciliations = {}
-        self._failure_counts = {}
-        self._retry_after = {}
+        self._active_lock_tokens = {}
 
     async def start_processing(self):
         """Start the email processing loop."""
@@ -62,7 +62,16 @@ class EmailProcessor:
         """Process emails from all enabled SMTP servers."""
         with get_db_session() as db:
             # Get all enabled SMTP configs
-            configs = db.query(SMTPConfig).filter(SMTPConfig.enabled).all()
+            configs = (
+                db.query(SMTPConfig)
+                .filter(SMTPConfig.enabled)
+                .order_by(
+                    SMTPConfig.backfill_complete.desc(),
+                    SMTPConfig.last_success_at.asc().nullsfirst(),
+                    SMTPConfig.id,
+                )
+                .all()
+            )
 
             if not configs:
                 logger.debug("No enabled SMTP configurations found")
@@ -71,11 +80,18 @@ class EmailProcessor:
             # Create detached config copies to avoid session issues
             config_copies = [SMTPConfig.create_detached(config) for config in configs]
 
-        # Process each server with detached config copies (in parallel)
-        tasks = []
-        for config_copy in config_copies:
-            task = asyncio.create_task(self._process_server(config_copy))
-            tasks.append(task)
+        from src.config import settings
+
+        semaphore = asyncio.Semaphore(max(1, settings.sync_account_concurrency))
+
+        async def process_bounded(config_copy):
+            async with semaphore:
+                return await self._process_server(config_copy)
+
+        tasks = [
+            asyncio.create_task(process_bounded(config_copy))
+            for config_copy in config_copies
+        ]
 
         # Wait for all servers to complete (outside the loop for parallel processing)
         if tasks:
@@ -85,16 +101,20 @@ class EmailProcessor:
         """Process emails from a single server."""
         config_id = config.id
         completed = False
-        lock_db = SessionLocal()
+        lock_token = None
 
         try:
-            retry_after = self._retry_after.get(config_id)
+            retry_after = config.retry_at
+            if retry_after and retry_after.tzinfo is None:
+                retry_after = retry_after.replace(tzinfo=timezone.utc)
             if not force and retry_after and datetime.now(tz=timezone.utc) < retry_after:
                 return False
-            acquired = lock_db.query(func.pg_try_advisory_lock(config_id)).scalar()
-            if not acquired:
+            lock_token = self._acquire_sync_lease(config_id)
+            if not lock_token:
                 logger.info("Skipping account %s because another worker holds its sync lock", config_id)
                 return False
+            self._active_lock_tokens[config_id] = lock_token
+            self._mark_sync_attempt(config_id)
 
             if config.provider == "gmail" and config.auth_type == "oauth2":
                 await self._process_gmail_api(config)
@@ -107,33 +127,53 @@ class EmailProcessor:
                     await self.active_clients[client_key].update_config(config)
 
                 client = self.active_clients[client_key]
-                sync_since = self._get_sync_since(config_id)
 
                 # Stats are updated after each batch so an interrupted
                 # mailbox scan can resume from its durable folder cursor.
-                async for batch in client.fetch_new_emails(since=sync_since):
+                from src.config import settings
+
+                async for batch in client.fetch_new_emails(
+                    limit=settings.imap_backfill_messages_per_cycle,
+                    since=None,
+                ):
                     await self._process_emails(batch)
                     if batch:
                         await self._update_server_stats(config, len(batch))
                         self._persist_sync_cursors(batch)
+                        self._refresh_sync_lease(config_id)
                 self._persist_client_cursors(config_id, client)
-                try:
-                    await self._reconcile_provider_state(config_id, client)
-                except Exception as exc:
-                    logger.warning(
-                        "Provider state reconciliation failed for account %s: %s",
-                        config_id,
-                        exc,
+                with get_db_session() as db:
+                    db_account = (
+                        db.query(SMTPConfig)
+                        .filter(SMTPConfig.id == config_id)
+                        .one()
                     )
+                    db_account.backfill_complete = client.backfill_complete
+                if client.backfill_complete:
+                    try:
+                        await self._reconcile_provider_state(config_id, client)
+                    except Exception as exc:
+                        logger.warning(
+                            "Provider state reconciliation failed for account %s: %s",
+                            config_id,
+                            exc,
+                        )
             completed = True
-            self._failure_counts.pop(config_id, None)
-            self._retry_after.pop(config_id, None)
 
+        except asyncio.CancelledError:
+            self._mark_sync_interrupted(config_id)
+            raise
         except Exception as e:
-            failures = self._failure_counts.get(config_id, 0) + 1
-            self._failure_counts[config_id] = failures
+            if not self.processing:
+                self._mark_sync_interrupted(config_id)
+                logger.info(
+                    "Synchronization interrupted during shutdown for account %s",
+                    config_id,
+                )
+                return False
+            failures = max(1, int(getattr(config, "consecutive_failures", 0) or 0) + 1)
             retry_seconds = min(3600, 30 * (2 ** min(failures - 1, 7)))
-            self._retry_after[config_id] = datetime.now(tz=timezone.utc) + timedelta(seconds=retry_seconds)
+            self._mark_sync_failure(config_id, e, failures, retry_seconds)
             logger.error(
                 "Error processing server %s: %s: %r; retrying in %ss",
                 getattr(config, "name", "unknown"),
@@ -142,19 +182,150 @@ class EmailProcessor:
                 retry_seconds,
             )
         finally:
-            with contextlib.suppress(Exception):
-                lock_db.query(func.pg_advisory_unlock(config_id)).scalar()
-            lock_db.close()
             if completed:
                 try:
-                    with get_db_session() as db:
-                        db_config = db.query(SMTPConfig).filter(SMTPConfig.id == config_id).first()
-                        if db_config:
-                            db_config.last_check = datetime.now(tz=timezone.utc)
+                    self._mark_sync_success(config_id)
                 except Exception as e:
                     logger.error("Error updating last_check for config %s: %s", config_id, e)
+            if lock_token:
+                self._release_sync_lease(config_id, lock_token)
+            self._active_lock_tokens.pop(config_id, None)
 
         return completed
+
+    @staticmethod
+    def _sync_error(exc: Exception) -> tuple[str, str]:
+        message = str(exc).replace("\n", " ").strip()[:500]
+        lowered = message.lower()
+        if "auth" in lowered or "login" in lowered:
+            code = "ACCOUNT_AUTH_FAILED"
+        elif "timeout" in lowered or "timed out" in lowered:
+            code = "PROVIDER_TIMEOUT"
+        elif "rate" in lowered or "429" in lowered:
+            code = "PROVIDER_RATE_LIMITED"
+        else:
+            code = "PROVIDER_SYNC_FAILED"
+        return code, message or type(exc).__name__
+
+    @staticmethod
+    def _acquire_sync_lease(config_id: int) -> str | None:
+        from src.config import settings
+
+        now = datetime.now(tz=timezone.utc)
+        token = uuid.uuid4().hex
+        with SessionLocal.begin() as db:
+            updated = (
+                db.query(SMTPConfig)
+                .filter(
+                    SMTPConfig.id == config_id,
+                    or_(
+                        SMTPConfig.sync_lock_expires_at.is_(None),
+                        SMTPConfig.sync_lock_expires_at < now,
+                    ),
+                )
+                .update(
+                    {
+                        SMTPConfig.sync_lock_token: token,
+                        SMTPConfig.sync_locked_at: now,
+                        SMTPConfig.sync_lock_expires_at: now
+                        + timedelta(seconds=settings.sync_lease_seconds),
+                    },
+                    synchronize_session=False,
+                )
+            )
+        return token if updated else None
+
+    def _refresh_sync_lease(self, config_id: int) -> None:
+        from src.config import settings
+
+        token = self._active_lock_tokens.get(config_id)
+        if not token:
+            return
+        now = datetime.now(tz=timezone.utc)
+        with SessionLocal.begin() as db:
+            db.query(SMTPConfig).filter(
+                SMTPConfig.id == config_id,
+                SMTPConfig.sync_lock_token == token,
+            ).update(
+                {
+                    SMTPConfig.sync_lock_expires_at: now
+                    + timedelta(seconds=settings.sync_lease_seconds)
+                },
+                synchronize_session=False,
+            )
+
+    @staticmethod
+    def _release_sync_lease(config_id: int, token: str) -> None:
+        with SessionLocal.begin() as db:
+            db.query(SMTPConfig).filter(
+                SMTPConfig.id == config_id,
+                SMTPConfig.sync_lock_token == token,
+            ).update(
+                {
+                    SMTPConfig.sync_lock_token: None,
+                    SMTPConfig.sync_locked_at: None,
+                    SMTPConfig.sync_lock_expires_at: None,
+                },
+                synchronize_session=False,
+            )
+
+    @staticmethod
+    def _mark_sync_attempt(config_id: int) -> None:
+        now = datetime.now(tz=timezone.utc)
+        with SessionLocal.begin() as db:
+            db.query(SMTPConfig).filter(SMTPConfig.id == config_id).update(
+                {
+                    SMTPConfig.last_attempt_at: now,
+                    SMTPConfig.sync_state: "syncing",
+                },
+                synchronize_session=False,
+            )
+
+    @staticmethod
+    def _mark_sync_success(config_id: int) -> None:
+        now = datetime.now(tz=timezone.utc)
+        with SessionLocal.begin() as db:
+            account = db.query(SMTPConfig).filter(SMTPConfig.id == config_id).one()
+            account.last_check = now
+            account.last_success_at = now
+            account.sync_state = (
+                "healthy" if account.backfill_complete else "backfilling"
+            )
+            account.last_error_code = None
+            account.last_error_message = None
+            account.consecutive_failures = 0
+            account.retry_at = None
+
+    @staticmethod
+    def _mark_sync_interrupted(config_id: int) -> None:
+        with SessionLocal.begin() as db:
+            account = db.query(SMTPConfig).filter(SMTPConfig.id == config_id).one()
+            account.sync_state = (
+                "healthy" if account.backfill_complete else "backfilling"
+            )
+
+    @classmethod
+    def _mark_sync_failure(
+        cls,
+        config_id: int,
+        exc: Exception,
+        failures: int,
+        retry_seconds: int,
+    ) -> None:
+        code, message = cls._sync_error(exc)
+        now = datetime.now(tz=timezone.utc)
+        with SessionLocal.begin() as db:
+            db.query(SMTPConfig).filter(SMTPConfig.id == config_id).update(
+                {
+                    SMTPConfig.sync_state: "error",
+                    SMTPConfig.last_error_code: code,
+                    SMTPConfig.last_error_message: message,
+                    SMTPConfig.consecutive_failures: failures,
+                    SMTPConfig.retry_at: now
+                    + timedelta(seconds=retry_seconds),
+                },
+                synchronize_session=False,
+            )
 
     async def _process_gmail_api(self, config: SMTPConfig) -> None:
         """Use Gmail history checkpoints for OAuth-backed Gmail accounts."""
@@ -206,6 +377,9 @@ class EmailProcessor:
                 if not account.initial_sync_complete and not account.sync_page_token:
                     account.sync_generation = (account.sync_generation or 0) + 1
                     account.provider_sync_token = history_id
+                    account.backfill_complete = False
+                    account.backfill_processed = 0
+                    account.backfill_total = int(profile.get("messagesTotal") or 0) or None
 
         for _ in range(settings.gmail_backfill_pages_per_cycle):
             with get_db_session() as db:
@@ -308,6 +482,9 @@ class EmailProcessor:
                     message["last_seen_sync_generation"] = sync_generation
                 messages.append(message)
             await self._process_emails(messages)
+            client_config = getattr(client, "config", None)
+            if client_config is not None:
+                self._refresh_sync_lease(client_config.id)
             processed_count += len(messages)
         return processed_count, missing
 
@@ -335,6 +512,9 @@ class EmailProcessor:
         with get_db_session() as db:
             account = db.query(SMTPConfig).filter(SMTPConfig.id == config_id).one()
             account.initial_sync_complete = False
+            account.backfill_complete = False
+            account.backfill_processed = 0
+            account.backfill_total = None
             account.provider_sync_token = None
             account.sync_page_token = None
 
@@ -363,6 +543,7 @@ class EmailProcessor:
                 elif settings.upstream_delete_policy == "tombstone":
                     message.deleted_at = now
             account.initial_sync_complete = True
+            account.backfill_complete = True
             account.sync_page_token = None
 
     @staticmethod
@@ -386,24 +567,6 @@ class EmailProcessor:
                     db.delete(message)
                 elif settings.upstream_delete_policy == "tombstone":
                     message.deleted_at = now
-
-    def _get_sync_since(self, config_id: int):
-        """Resume near the newest stored email instead of rescanning the mailbox."""
-        with get_db_session() as db:
-            latest_email_date = (
-                db.query(func.max(EmailLog.email_date))
-                .filter(EmailLog.smtp_config_id == config_id)
-                .scalar()
-            )
-
-        if latest_email_date is None:
-            return None
-
-        if latest_email_date.tzinfo is None:
-            latest_email_date = latest_email_date.replace(tzinfo=timezone.utc)
-
-        now = datetime.now(tz=timezone.utc)
-        return min(latest_email_date, now) - timedelta(days=1)
 
     async def _process_emails(self, emails: List[dict]):
         """Process a batch of emails."""
@@ -440,6 +603,17 @@ class EmailProcessor:
                             existing_email.last_seen_sync_generation = email_data[
                                 "last_seen_sync_generation"
                             ]
+                        if not existing_email.content_fingerprint:
+                            existing_email.content_fingerprint = content_fingerprint(
+                                email_data.get("subject"),
+                                email_data.get("body_plain"),
+                            )
+                        if not db.query(MailParticipant.id).filter(
+                            MailParticipant.email_log_id == existing_email.id
+                        ).first():
+                            db.add_all(
+                                participant_models(existing_email.id, email_data)
+                            )
                         logger.debug("Email already exists: %s", email_data["message_id"])
                         continue
 
@@ -462,6 +636,16 @@ class EmailProcessor:
                         legacy_email.last_seen_sync_generation = email_data.get(
                             "last_seen_sync_generation"
                         )
+                        legacy_email.content_fingerprint = content_fingerprint(
+                            email_data.get("subject"),
+                            email_data.get("body_plain"),
+                        )
+                        if not db.query(MailParticipant.id).filter(
+                            MailParticipant.email_log_id == legacy_email.id
+                        ).first():
+                            db.add_all(
+                                participant_models(legacy_email.id, email_data)
+                            )
                         logger.debug("Upgraded legacy provider reference for %s", email_data["message_id"])
                         continue
 
@@ -490,6 +674,10 @@ class EmailProcessor:
                         bcc_addresses=sanitize_db_text(email_data.get("bcc_addresses")),
                         in_reply_to=sanitize_db_text(email_data.get("in_reply_to")),
                         references=sanitize_db_text(email_data.get("references")),
+                        content_fingerprint=content_fingerprint(
+                            email_data.get("subject"),
+                            body_plain,
+                        ),
                         last_seen_sync_generation=email_data.get(
                             "last_seen_sync_generation"
                         ),
@@ -501,6 +689,7 @@ class EmailProcessor:
 
                     db.add(email_log)
                     db.flush()
+                    db.add_all(participant_models(email_log.id, email_data))
 
                     if email_data["attachment_count"] > 0 and "raw_email" in email_data:
                         attachments = await attachment_handler.extract_attachments(
@@ -529,6 +718,8 @@ class EmailProcessor:
                 db_config = db.query(SMTPConfig).filter(SMTPConfig.id == config_id).first()
                 if db_config:
                     db_config.total_emails_processed += email_count
+                    if not db_config.backfill_complete:
+                        db_config.backfill_processed += email_count
         except Exception as e:
             logger.error("Error updating server stats: %s", e)
 
@@ -560,8 +751,19 @@ class EmailProcessor:
                 if not cursor:
                     cursor = MailSyncCursor(smtp_config_id=account_id, folder=folder)
                     db.add(cursor)
+                validity_changed = (
+                    cursor.uid_validity is not None
+                    and state["uid_validity"] is not None
+                    and cursor.uid_validity != state["uid_validity"]
+                )
                 cursor.uid_validity = state["uid_validity"]
-                cursor.last_uid = max(cursor.last_uid or 0, state["last_uid"])
+                cursor.last_uid = (
+                    state["last_uid"]
+                    if validity_changed
+                    else max(cursor.last_uid or 0, state["last_uid"])
+                )
+                if validity_changed:
+                    cursor.backfill_complete = False
                 cursor.last_success_at = datetime.now(tz=timezone.utc)
                 cursor.last_error = None
 
@@ -582,8 +784,22 @@ class EmailProcessor:
                 if not cursor:
                     cursor = MailSyncCursor(smtp_config_id=account_id, folder=folder)
                     db.add(cursor)
-                cursor.uid_validity = client._uid_validities.get(folder)
-                cursor.last_uid = max(cursor.last_uid or 0, last_uid)
+                uid_validity = client._uid_validities.get(folder)
+                validity_changed = (
+                    cursor.uid_validity is not None
+                    and uid_validity is not None
+                    and cursor.uid_validity != uid_validity
+                )
+                cursor.uid_validity = uid_validity
+                cursor.last_uid = (
+                    last_uid
+                    if validity_changed
+                    else max(cursor.last_uid or 0, last_uid)
+                )
+                cursor.backfill_complete = client._folder_backfill_complete.get(
+                    folder,
+                    False,
+                )
                 cursor.last_success_at = datetime.now(tz=timezone.utc)
                 cursor.last_error = None
 
@@ -592,7 +808,11 @@ class EmailProcessor:
         from src.config import settings
 
         now = datetime.now(tz=timezone.utc)
-        last = self._last_reconciliations.get(config_id)
+        with get_db_session() as db:
+            account = db.query(SMTPConfig).filter(SMTPConfig.id == config_id).one()
+            last = account.last_reconciled_at
+        if last and last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
         if last and (now - last).total_seconds() < settings.deletion_reconcile_interval:
             return
         snapshots = await client.fetch_folder_state()
@@ -620,7 +840,8 @@ class EmailProcessor:
                     message.deleted_at = None
                     if message.imap_uid in flags:
                         message.flags = flags[message.imap_uid]
-        self._last_reconciliations[config_id] = now
+            account = db.query(SMTPConfig).filter(SMTPConfig.id == config_id).one()
+            account.last_reconciled_at = now
 
     async def process_server_now(self, server_id: int, owner_user_id: int | None = None) -> dict:
         """Manually trigger processing for a specific server."""

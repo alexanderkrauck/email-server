@@ -30,6 +30,14 @@ async def test_mcp_tool_surface_is_narrow_and_annotated():
     assert "total_message_count" in str(account_schema)
     assert "message_count" in str(account_schema)
     assert "imap_host" in str(account_schema)
+    search_schema = next(
+        tool for tool in tools if tool.name == "search_mail"
+    ).output_schema
+    assert "total_count" in str(search_schema)
+    assert "next_cursor" in str(search_schema)
+    assert "account_coverage" in str(search_schema)
+    send_schema = next(tool for tool in tools if tool.name == "send_mail").parameters
+    assert "attachment_ids" in str(send_schema)
     send_annotations = next(tool for tool in tools if tool.name == "send_mail").annotations
     assert send_annotations.readOnlyHint is False
     assert send_annotations.openWorldHint is True

@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     gmail_backfill_pages_per_cycle: int = 5
     gmail_history_pages_per_cycle: int = 20
     gmail_request_concurrency: int = 10
+    imap_backfill_messages_per_cycle: int = 500
+    sync_account_concurrency: int = 4
+    sync_lease_seconds: int = 1800
+    sync_stale_after_seconds: int = 900
 
     # Attachment Settings
     max_attachment_size: int = 10 * 1024 * 1024  # 10MB
@@ -63,6 +67,7 @@ class Settings(BaseSettings):
     ]
     allowed_client_redirect_uris: list[str] = [
         "https://claude.ai/api/mcp/auth_callback",
+        "https://chatgpt.com/connector/oauth/*",
         "http://localhost:*",
         "http://127.0.0.1:*",
     ]
@@ -78,6 +83,7 @@ class Settings(BaseSettings):
     session_secret: str = ""
     attachment_token_ttl_seconds: int = 300
     account_connect_token_ttl_seconds: int = 300
+    search_cursor_ttl_seconds: int = 86_400
     extraction_timeout_seconds: int = 30
     max_extracted_text_chars: int = 250_000
     max_message_body_chars: int = 250_000
@@ -88,6 +94,7 @@ class Settings(BaseSettings):
     max_sends_per_minute: int = 20
     max_accounts_per_user: int = 20
     max_outbound_attachment_bytes: int = 25 * 1024 * 1024
+    max_outbound_attachments: int = 20
 
     # Logging
     log_level: str = "INFO"

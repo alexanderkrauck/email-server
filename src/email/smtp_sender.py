@@ -166,14 +166,27 @@ class EmailSender:
                         part.set_payload(attachment["data"])
                         encoders.encode_base64(part)
 
-                        filename = attachment.get("filename", "attachment")
-                        part.add_header("Content-Disposition", f"attachment; filename= {filename}")
+                        from src.email import sanitize_filename
+
+                        filename = sanitize_filename(
+                            attachment.get("filename", "attachment")
+                        )
+                        part.add_header(
+                            "Content-Disposition",
+                            "attachment",
+                            filename=filename,
+                        )
 
                         msg.attach(part)
                         logger.debug("Added attachment: %s", filename)
 
                     except Exception as e:
                         logger.error("Error adding attachment %s: %s", attachment.get("filename", "unknown"), e)
+                        return {
+                            "success": False,
+                            "message": "Failed to construct an outbound attachment",
+                            "delivery_state": "failed",
+                        }
 
             # Collect all recipients
             all_recipients = to_addresses[:]

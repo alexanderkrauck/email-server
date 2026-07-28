@@ -81,3 +81,72 @@ def test_unverified_google_email_is_rejected():
         )
 
     assert error.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_expected_mcp_errors_are_structured_without_disabling_masking():
+    import json
+
+    from fastapi import HTTPException
+    from fastmcp.exceptions import ToolError
+
+    from src.security.mcp_errors import mcp_error_boundary
+
+    @mcp_error_boundary
+    async def fails():
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Provider connection failed",
+                "imap": True,
+                "smtp": False,
+            },
+        )
+
+    with pytest.raises(ToolError) as error:
+        await fails()
+    payload = json.loads(str(error.value))
+    assert payload == {
+        "code": "PROVIDER_CONNECTION_FAILED",
+        "details": {"imap": True, "smtp": False},
+        "message": "Provider connection failed",
+        "retryable": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_mcp_permission_errors_do_not_become_generic_failures():
+    import json
+
+    from fastmcp.exceptions import ToolError
+
+    from src.security.mcp_errors import mcp_error_boundary
+
+    @mcp_error_boundary
+    async def fails():
+        raise PermissionError("internal identity context")
+
+    with pytest.raises(ToolError) as error:
+        await fails()
+    assert json.loads(str(error.value)) == {
+        "code": "AUTHENTICATION_REQUIRED",
+        "message": "Authentication required",
+        "retryable": False,
+    }
+
+
+def test_chatgpt_dynamic_connector_callback_is_allowlisted():
+    from fastmcp.server.auth.redirect_validation import validate_redirect_uri
+
+    from src.config import settings
+
+    callback = "https://chatgpt.com/connector/oauth/rpYtr-3A0Ot6"
+    assert validate_redirect_uri(callback, settings.allowed_client_redirect_uris)
+    assert not validate_redirect_uri(
+        "https://chatgpt.com.evil.example/connector/oauth/rpYtr-3A0Ot6",
+        settings.allowed_client_redirect_uris,
+    )
+    assert not validate_redirect_uri(
+        "https://chatgpt.com/other/oauth/rpYtr-3A0Ot6",
+        settings.allowed_client_redirect_uris,
+    )

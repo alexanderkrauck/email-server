@@ -1,5 +1,6 @@
 """SMTP/IMAP client for connecting to email servers."""
 
+import asyncio
 import contextlib
 import json
 import logging
@@ -43,6 +44,14 @@ class SMTPClient:
         self._uid_validities: Dict[str, int] = {
             folder: state["uid_validity"] for folder, state in cursors.items() if state.get("uid_validity") is not None
         }
+        self._folder_backfill_complete: Dict[str, bool] = {
+            folder: bool(state.get("backfill_complete"))
+            for folder, state in cursors.items()
+        }
+        self._discovered_folders: List[str] = []
+        self.backfill_complete = bool(cursors) and all(
+            self._folder_backfill_complete.values()
+        )
 
     async def update_config(self, smtp_config: SMTPConfig):
         """Apply changed account settings and reconnect when required."""
@@ -50,10 +59,23 @@ class SMTPClient:
         new_settings = tuple(getattr(smtp_config, field, None) for field in self.CONNECTION_FIELDS)
         self.config = smtp_config
         for folder, state in (getattr(smtp_config, "sync_cursors", {}) or {}).items():
+            incoming_validity = state.get("uid_validity")
+            validity_changed = (
+                self._uid_validities.get(folder) is not None
+                and incoming_validity is not None
+                and self._uid_validities[folder] != incoming_validity
+            )
             if state.get("last_uid") is not None:
-                self._last_uids[folder] = max(self._last_uids.get(folder, 0), state["last_uid"])
-            if state.get("uid_validity") is not None:
-                self._uid_validities[folder] = state["uid_validity"]
+                self._last_uids[folder] = (
+                    state["last_uid"]
+                    if validity_changed
+                    else max(self._last_uids.get(folder, 0), state["last_uid"])
+                )
+            if incoming_validity is not None:
+                self._uid_validities[folder] = incoming_validity
+            self._folder_backfill_complete[folder] = bool(
+                state.get("backfill_complete")
+            )
 
         if old_settings != new_settings:
             await self.disconnect()
@@ -150,11 +172,26 @@ class SMTPClient:
 
         try:
             folders = await self._get_folders()
+            self._discovered_folders = folders
+            remaining = max(1, limit) if limit is not None else None
 
-            for folder in folders:
+            for folder_index, folder in enumerate(folders):
+                if remaining is not None and remaining <= 0:
+                    for pending_folder in folders[folder_index:]:
+                        self._folder_backfill_complete.setdefault(
+                            pending_folder,
+                            False,
+                        )
+                    break
                 try:
-                    async for batch in self._fetch_folder(folder, limit, since):
+                    async for batch in self._fetch_folder(
+                        folder,
+                        remaining,
+                        since,
+                    ):
                         yield batch
+                        if remaining is not None:
+                            remaining -= len(batch)
                 except Exception as e:
                     logger.error(
                         "Error processing folder %s for %s: %s: %r",
@@ -164,6 +201,10 @@ class SMTPClient:
                         e,
                     )
                     raise
+            self.backfill_complete = bool(folders) and all(
+                self._folder_backfill_complete.get(folder, False)
+                for folder in folders
+            )
 
         except Exception as e:
             await self.disconnect()
@@ -218,12 +259,14 @@ class SMTPClient:
         if previous_uid_validity and uid_validity and previous_uid_validity != uid_validity:
             logger.warning("UIDVALIDITY changed for %s in %s; resetting checkpoint", folder, self.config.name)
             self._last_uids.pop(folder, None)
+            self._folder_backfill_complete[folder] = False
         if uid_validity:
             self._uid_validities[folder] = uid_validity
 
         last_uid = self._last_uids.get(folder)
         uid_next = self._extract_uid_next(select_response.lines)
         if last_uid is not None and uid_next is not None and last_uid >= uid_next - 1:
+            self._folder_backfill_complete[folder] = True
             logger.debug("No new UIDs in folder %s for %s", folder, self.config.name)
             return
 
@@ -245,11 +288,16 @@ class SMTPClient:
         if not message_ids:
             if uid_next is not None:
                 self._last_uids[folder] = max(0, uid_next - 1)
+            self._folder_backfill_complete[folder] = True
             logger.debug("No emails found in folder %s for %s", folder, self.config.name)
             return
 
-        if limit and len(message_ids) > limit:
-            message_ids = message_ids[-limit:]
+        historical_complete = self._folder_backfill_complete.get(folder, False)
+        truncated = bool(limit and len(message_ids) > limit)
+        if truncated:
+            # Always advance from the oldest remaining UID. Selecting the newest
+            # messages here would permanently skip history when the cursor moves.
+            message_ids = message_ids[:limit]
 
         total = len(message_ids)
         logger.info(
@@ -310,6 +358,10 @@ class SMTPClient:
 
         if highest_uid is not None:
             self._last_uids[folder] = highest_uid
+        if historical_complete or not truncated:
+            self._folder_backfill_complete[folder] = True
+        else:
+            self._folder_backfill_complete[folder] = False
 
     @staticmethod
     def _format_imap_date(value: datetime) -> str:

@@ -3,6 +3,7 @@
 from datetime import datetime
 from typing import Literal
 
+from fastapi import HTTPException
 from mcp.types import ToolAnnotations
 
 from src.config import settings
@@ -17,9 +18,14 @@ from src.handlers.email_handler_types import SendMailInput
 from src.security.account_connect_tokens import issue_account_connect_token
 from src.security.auth import current_mcp_user
 from src.security.download_tokens import issue_download_token
-from src.services.attachment_service import owned_attachment
+from src.security.mcp_errors import mcp_error_boundary
+from src.services.attachment_service import (
+    owned_attachment,
+    refetch_attachment_bytes,
+)
 from src.services.mail_service import (
     MailAccountSummary,
+    SearchPage,
     get_thread as load_thread,
     mail_account_summary,
     owned_email,
@@ -72,6 +78,7 @@ def register_mcp_tools(mcp) -> None:
         ),
         annotations=READ_ONLY,
     )
+    @mcp_error_boundary
     async def list_mail_accounts() -> MailAccountSummary:
         user = await current_mcp_user()
         with SessionLocal() as db:
@@ -86,6 +93,7 @@ def register_mcp_tools(mcp) -> None:
         ),
         annotations=WRITE_EXTERNAL,
     )
+    @mcp_error_boundary
     async def add_mail_account(
         name: str,
         email_address: str,
@@ -132,6 +140,7 @@ def register_mcp_tools(mcp) -> None:
         ),
         annotations=WRITE_EXTERNAL,
     )
+    @mcp_error_boundary
     async def update_mail_account(
         account_id: int,
         name: str | None = None,
@@ -187,6 +196,7 @@ def register_mcp_tools(mcp) -> None:
         ),
         annotations=WRITE_EXTERNAL,
     )
+    @mcp_error_boundary
     async def begin_gmail_connection() -> dict:
         user = await current_mcp_user()
         token = issue_account_connect_token(user.id)
@@ -200,19 +210,26 @@ def register_mcp_tools(mcp) -> None:
 
     @mcp.tool(
         name="search_mail",
-        description="Search the signed-in user's mail with indexed lexical search and optional filters.",
+        description=(
+            "Exhaustively search owned mail with exact counts, stable cursor pagination, "
+            "participant/domain facets, match provenance, deduplication, and sync coverage."
+        ),
         annotations=READ_ONLY,
     )
+    @mcp_error_boundary
     async def search_mail(
         query: str = "",
         account_id: int | None = None,
         date_from: str | None = None,
         date_to: str | None = None,
         participant: str | None = None,
+        participants: list[str] | None = None,
         has_attachments: bool = False,
         search_attachments: bool = False,
         limit: int = 50,
-    ) -> list[dict]:
+        cursor: str | None = None,
+        deduplicate: Literal["none", "exact", "mirror"] = "exact",
+    ) -> SearchPage:
         user = await current_mcp_user()
         with SessionLocal() as db:
             return lexical_search(
@@ -223,24 +240,38 @@ def register_mcp_tools(mcp) -> None:
                 date_from=_date(date_from),
                 date_to=_date(date_to),
                 participant=participant,
+                participants=participants,
                 has_attachments=has_attachments,
                 search_attachments=search_attachments,
                 limit=limit,
+                cursor=cursor,
+                deduplicate=deduplicate,
             )
 
     @mcp.tool(
         name="search_mail_regex",
-        description="Run a bounded expert regex search within an account or date scope.",
+        description=(
+            "Run bounded Unicode regex search across one or more fields. Requires an "
+            "account or date scope and returns exact counts, matches, and a stable cursor."
+        ),
         annotations=READ_ONLY,
     )
+    @mcp_error_boundary
     async def search_mail_regex(
         pattern: str,
-        field: Literal["sender", "recipient", "subject", "body", "attachment"],
+        field: Literal["sender", "recipient", "subject", "body", "attachment"]
+        | None = None,
+        fields: list[
+            Literal["sender", "recipient", "subject", "body", "attachment"]
+        ]
+        | None = None,
         account_id: int | None = None,
         date_from: str | None = None,
         date_to: str | None = None,
         limit: int = 25,
-    ) -> list[dict]:
+        cursor: str | None = None,
+        deduplicate: Literal["none", "exact", "mirror"] = "exact",
+    ) -> dict:
         user = await current_mcp_user()
         with SessionLocal() as db:
             return regex_search(
@@ -248,37 +279,69 @@ def register_mcp_tools(mcp) -> None:
                 user,
                 pattern=pattern,
                 field=field,
+                fields=fields,
                 account_id=account_id,
                 date_from=_date(date_from),
                 date_to=_date(date_to),
                 limit=limit,
+                cursor=cursor,
+                deduplicate=deduplicate,
             )
 
     @mcp.tool(
         name="get_mail",
-        description="Retrieve one owned message, its body, and bounded attachment metadata.",
+        description=(
+            "Retrieve one owned message with bounded body output. Plain text is the "
+            "default; request HTML explicitly when formatting is required."
+        ),
         annotations=READ_ONLY,
     )
-    async def get_mail(email_id: int) -> dict:
+    @mcp_error_boundary
+    async def get_mail(
+        email_id: int,
+        body_format: Literal["plain", "html", "both", "metadata"] = "plain",
+        max_body_chars: int = 50_000,
+    ) -> dict:
         user = await current_mcp_user()
         with SessionLocal() as db:
-            return serialize_email(owned_email(db, user.id, email_id), include_body=True)
+            return serialize_email(
+                owned_email(db, user.id, email_id),
+                body_format=body_format,
+                max_body_chars=max_body_chars,
+            )
 
     @mcp.tool(
         name="get_thread",
-        description="Retrieve the thread containing one owned message.",
+        description=(
+            "Reconstruct a thread using provider IDs or RFC reply headers, returning "
+            "bounded plain text by default plus reconstruction confidence."
+        ),
         annotations=READ_ONLY,
     )
-    async def get_thread(email_id: int) -> list[dict]:
+    @mcp_error_boundary
+    async def get_thread(
+        email_id: int,
+        body_format: Literal["plain", "html", "both", "metadata"] = "plain",
+        max_body_chars: int = 20_000,
+        limit: int = 100,
+    ) -> dict:
         user = await current_mcp_user()
         with SessionLocal() as db:
-            return load_thread(db, user, email_id)
+            return load_thread(
+                db,
+                user,
+                email_id,
+                body_format=body_format,
+                max_body_chars=max_body_chars,
+                limit=limit,
+            )
 
     @mcp.tool(
         name="get_attachment",
         description="Get attachment metadata, bounded extracted text, and an expiring original-binary URL.",
         annotations=READ_EXTERNAL,
     )
+    @mcp_error_boundary
     async def get_attachment(
         attachment_id: int,
         include_extracted_text: bool = True,
@@ -299,9 +362,13 @@ def register_mcp_tools(mcp) -> None:
 
     @mcp.tool(
         name="send_mail",
-        description="Send mail through an owned account. Use a stable idempotency key when retrying.",
+        description=(
+            "Send mail through an owned account. Existing owned attachment IDs are "
+            "refetched and checksum-verified ephemerally. Use a stable idempotency key when retrying."
+        ),
         annotations=WRITE_EXTERNAL,
     )
+    @mcp_error_boundary
     async def send_mail(
         account_id: int,
         to_addresses: list[str],
@@ -311,6 +378,7 @@ def register_mcp_tools(mcp) -> None:
         cc_addresses: list[str] | None = None,
         bcc_addresses: list[str] | None = None,
         reply_to: str | None = None,
+        attachment_ids: list[int] | None = None,
         idempotency_key: str | None = None,
     ) -> dict:
         user = await current_mcp_user()
@@ -326,4 +394,28 @@ def register_mcp_tools(mcp) -> None:
             idempotency_key=idempotency_key,
         )
         with SessionLocal() as db:
-            return await send_message(db, user, payload)
+            selected_ids = list(dict.fromkeys(attachment_ids or []))
+            if len(selected_ids) > settings.max_outbound_attachments:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Too many outbound attachments",
+                )
+            attachments = []
+            for attachment_id in selected_ids:
+                attachment, binary = await refetch_attachment_bytes(
+                    db,
+                    user.id,
+                    attachment_id,
+                )
+                attachments.append(
+                    {
+                        "data": binary,
+                        "filename": attachment.filename,
+                    }
+                )
+            return await send_message(
+                db,
+                user,
+                payload,
+                attachments=attachments or None,
+            )

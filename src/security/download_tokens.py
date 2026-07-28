@@ -20,7 +20,10 @@ def _encode_segment(value: bytes) -> str:
 
 
 def _decode_segment(value: str) -> bytes:
-    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    decoded = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    if _encode_segment(decoded) != value:
+        raise binascii.Error("Non-canonical base64url segment")
+    return decoded
 
 
 def issue_download_token(user_id: int, attachment_id: int) -> str:

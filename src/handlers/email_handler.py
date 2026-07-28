@@ -5,6 +5,7 @@ import logging
 import secrets
 from datetime import datetime
 from typing import Annotated
+from urllib.parse import quote
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -174,6 +175,7 @@ async def create_account(payload: MailAccountCreate, user: CurrentUser, db: Sess
         raise HTTPException(status_code=409, detail="An account with this name already exists")
     values = payload.model_dump(exclude={"password", "verify_connection"})
     account = SMTPConfig(owner_user_id=user.id, auth_type="password", **values)
+    account.sync_state = "pending" if account.enabled else "disabled"
     account.password = payload.password.get_secret_value()
     validate_transport(account)
     db.add(account)
@@ -212,6 +214,12 @@ async def update_account(
         exclude_unset=True,
         exclude={"password", "verify_connection"},
     )
+    identity_fields = {"provider", "host", "username"}
+    identity_changed = {
+        field
+        for field in identity_fields
+        if field in values and getattr(account, field) != values[field]
+    }
     for field, value in values.items():
         setattr(account, field, value)
     if payload.password is not None:
@@ -239,6 +247,26 @@ async def update_account(
                 status_code=400,
                 detail={"message": "Provider connection failed", **connection},
             )
+    if identity_changed:
+        account.sync_cursors.clear()
+        account.initial_sync_complete = False
+        account.backfill_complete = False
+        account.backfill_processed = 0
+        account.backfill_total = None
+        account.provider_sync_token = None
+        account.sync_page_token = None
+    account.sync_lock_token = None
+    account.sync_locked_at = None
+    account.sync_lock_expires_at = None
+    account.last_error_code = None
+    account.last_error_message = None
+    account.consecutive_failures = 0
+    account.retry_at = None
+    account.sync_state = (
+        "disabled"
+        if not account.enabled
+        else ("healthy" if account.backfill_complete else "pending")
+    )
     db.commit()
     db.refresh(account)
     await email_sender_manager.invalidate(account.id)
@@ -249,6 +277,11 @@ async def update_account(
 async def delete_account(account_id: int, user: CurrentUser, db: Session = Depends(get_db)):
     account = owned_account(db, user.id, account_id)
     account.enabled = False
+    account.sync_state = "disabled"
+    account.sync_lock_token = None
+    account.sync_locked_at = None
+    account.sync_lock_expires_at = None
+    account.retry_at = None
     db.commit()
     return {"success": True, "message": "Account disabled; synced data was retained"}
 
@@ -385,6 +418,11 @@ async def gmail_callback(
     else:
         account.credential_ciphertext = encode_oauth_credential(credentials.refresh_token)
         account.enabled = True
+    account.sync_state = "healthy" if account.backfill_complete else "pending"
+    account.last_error_code = None
+    account.last_error_message = None
+    account.consecutive_failures = 0
+    account.retry_at = None
     db.commit()
     db.refresh(account)
     return RedirectResponse(
@@ -398,9 +436,17 @@ async def list_emails(
     db: Session = Depends(get_db),
     account_id: int | None = None,
     limit: int = Query(default=50, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
+    cursor: str | None = None,
+    deduplicate: str = Query(default="exact", pattern="^(none|exact|mirror)$"),
 ):
-    return search_mail(db, user, account_id=account_id, limit=limit, offset=offset)
+    return search_mail(
+        db,
+        user,
+        account_id=account_id,
+        limit=limit,
+        cursor=cursor,
+        deduplicate=deduplicate,
+    )
 
 
 @router.get("/emails/search")
@@ -412,10 +458,12 @@ async def search_emails(
     date_from: datetime | None = None,
     date_to: datetime | None = None,
     participant: str | None = None,
+    participants: list[str] | None = Query(default=None),
     has_attachments: bool = False,
     search_attachments: bool = False,
     limit: int = Query(default=50, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
+    cursor: str | None = None,
+    deduplicate: str = Query(default="exact", pattern="^(none|exact|mirror)$"),
 ):
     return search_mail(
         db,
@@ -425,10 +473,12 @@ async def search_emails(
         date_from=date_from,
         date_to=date_to,
         participant=participant,
+        participants=participants,
         has_attachments=has_attachments,
         search_attachments=search_attachments,
         limit=limit,
-        offset=offset,
+        cursor=cursor,
+        deduplicate=deduplicate,
     )
 
 
@@ -436,22 +486,28 @@ async def search_emails(
 async def search_emails_regex(
     user: CurrentUser,
     pattern: str,
-    field: str,
+    field: str | None = None,
+    fields: list[str] | None = Query(default=None),
     db: Session = Depends(get_db),
     account_id: int | None = None,
     date_from: datetime | None = None,
     date_to: datetime | None = None,
     limit: int = Query(default=25, ge=1, le=50),
+    cursor: str | None = None,
+    deduplicate: str = Query(default="exact", pattern="^(none|exact|mirror)$"),
 ):
     return search_mail_regex(
         db,
         user,
         pattern=pattern,
         field=field,
+        fields=fields,
         account_id=account_id,
         date_from=date_from,
         date_to=date_to,
         limit=limit,
+        cursor=cursor,
+        deduplicate=deduplicate,
     )
 
 
@@ -484,10 +540,19 @@ async def download_attachment(attachment_id: int, token: str, db: Session = Depe
     except ValueError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from None
     attachment, payload = await refetch_attachment_bytes(db, user_id, attachment_id)
+    from src.email import sanitize_filename
+
+    download_name = sanitize_filename(attachment.filename)
+    ascii_name = download_name.encode("ascii", errors="ignore").decode() or "attachment"
     return Response(
         content=payload,
         media_type=attachment.detected_content_type or attachment.content_type or "application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{attachment.filename}"'},
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{ascii_name}"; '
+                f"filename*=UTF-8''{quote(download_name)}"
+            )
+        },
     )
 
 

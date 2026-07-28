@@ -37,6 +37,7 @@ class EmailLog(Base):
     in_reply_to = Column(String(255), nullable=True)
     references = Column(Text, nullable=True)
     deleted_at = Column(DateTime, nullable=True)
+    last_seen_sync_generation = Column(Integer, nullable=True)
 
     body_plain = Column(Text, nullable=True)
     body_html = Column(Text, nullable=True)

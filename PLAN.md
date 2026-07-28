@@ -10,6 +10,7 @@ The original single-tenant GCP proposal has been superseded by the implemented m
 - Encrypted mailbox credentials and persistent OAuth state
 - Versioned Alembic migrations
 - Persistent incremental IMAP synchronization and metadata reconciliation
+- Resumable Gmail API backfill and history-based incremental synchronization
 - Indexed body and attachment search
 - Ephemeral original-attachment refetch through signed URLs
 - HTTPS production composition using Caddy

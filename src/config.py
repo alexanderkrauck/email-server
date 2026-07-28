@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     max_emails_per_batch: int = 50
     deletion_reconcile_interval: int = 21_600
     upstream_delete_policy: Literal["hard_delete", "tombstone", "retain"] = "hard_delete"
+    gmail_page_size: int = 100
+    gmail_backfill_pages_per_cycle: int = 5
+    gmail_history_pages_per_cycle: int = 20
+    gmail_request_concurrency: int = 10
 
     # Attachment Settings
     max_attachment_size: int = 10 * 1024 * 1024  # 10MB

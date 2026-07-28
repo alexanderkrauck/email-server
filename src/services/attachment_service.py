@@ -7,6 +7,7 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from src.email.attachment_handler import AttachmentHandler
+from src.email.gmail_api_client import GmailApiClient
 from src.email.smtp_client import SMTPClient
 from src.models.attachment import EmailAttachment
 from src.models.email import EmailLog
@@ -32,14 +33,25 @@ async def refetch_attachment_bytes(
     attachment = owned_attachment(db, user_id, attachment_id)
     message = attachment.email_log
     account = SMTPConfig.create_detached(message.mail_account)
-    client = SMTPClient(account)
-    try:
-        if message.folder and message.imap_uid is not None:
-            raw_email = await client.fetch_raw_email(message.folder, message.imap_uid, message.uid_validity)
-        else:
-            raw_email = await client.fetch_raw_by_message_id(message.message_id)
-    finally:
-        await client.disconnect()
+    if account.provider == "gmail" and account.auth_type == "oauth2":
+        gmail_client = GmailApiClient(account)
+        try:
+            raw_email = await gmail_client.get_raw_message(message.provider_message_id)
+        finally:
+            await gmail_client.close()
+        if raw_email is None:
+            raise HTTPException(status_code=404, detail="Provider message no longer exists")
+    else:
+        client = SMTPClient(account)
+        try:
+            if message.folder and message.imap_uid is not None:
+                raw_email = await client.fetch_raw_email(
+                    message.folder, message.imap_uid, message.uid_validity
+                )
+            else:
+                raw_email = await client.fetch_raw_by_message_id(message.message_id)
+        finally:
+            await client.disconnect()
 
     parsed = message_from_bytes(raw_email, policy=policy.default)
     candidates = []

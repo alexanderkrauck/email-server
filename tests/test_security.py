@@ -18,6 +18,7 @@ def test_download_token_is_bound_to_attachment_and_expiry_claim():
 
     token = issue_download_token(user_id=7, attachment_id=42)
 
+    assert token.count(".") == 1
     assert verify_download_token(token, attachment_id=42) == 7
     with pytest.raises(ValueError):
         verify_download_token(token, attachment_id=43)

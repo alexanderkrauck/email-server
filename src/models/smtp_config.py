@@ -51,6 +51,10 @@ class SMTPConfig(Base):
     last_check = Column(DateTime, nullable=True)
     total_emails_processed = Column(Integer, default=0)
     sync_locked_at = Column(DateTime, nullable=True)
+    provider_sync_token = Column(String(255), nullable=True)
+    sync_page_token = Column(Text, nullable=True)
+    initial_sync_complete = Column(Boolean, nullable=False, default=False)
+    sync_generation = Column(Integer, nullable=False, default=0)
 
     owner = relationship("User", back_populates="mail_accounts")
     emails = relationship("EmailLog", back_populates="mail_account")
@@ -94,6 +98,7 @@ class SMTPConfig(Base):
             "updated_at": self.updated_at.isoformat() if self.updated_at else "",
             "last_check": self.last_check.isoformat() if self.last_check else "",
             "total_emails_processed": self.total_emails_processed,
+            "initial_sync_complete": self.initial_sync_complete,
             "store_text_only_override": self.store_text_only_override,
             "max_attachment_size_override": self.max_attachment_size_override,
             "extract_pdf_text_override": self.extract_pdf_text_override,
@@ -122,12 +127,16 @@ class SMTPConfig(Base):
         detached.smtp_port = config.smtp_port
         detached.username = config.username
         detached.credential_ciphertext = config.credential_ciphertext
-        detached.password = config.password
+        detached.password = config.password if config.auth_type == "password" else ""
         detached.imap_use_ssl = config.imap_use_ssl
         detached.imap_use_tls = config.imap_use_tls
         detached.smtp_use_ssl = config.smtp_use_ssl
         detached.smtp_use_tls = config.smtp_use_tls
         detached.enabled = config.enabled
+        detached.provider_sync_token = config.provider_sync_token
+        detached.sync_page_token = config.sync_page_token
+        detached.initial_sync_complete = config.initial_sync_complete
+        detached.sync_generation = config.sync_generation
         detached.store_text_only_override = config.store_text_only_override
         detached.max_attachment_size_override = config.max_attachment_size_override
         detached.extract_pdf_text_override = config.extract_pdf_text_override

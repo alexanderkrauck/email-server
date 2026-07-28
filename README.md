@@ -115,6 +115,8 @@ Every account, message, attachment, sync, and send lookup is owner-scoped.
 - Alembic applies versioned, data-preserving migrations.
 - Message identity is unique by `(mail_account_id, provider_message_id)`; RFC `Message-ID` remains metadata.
 - IMAP cursors persist UID, UIDVALIDITY, and folder.
+- OAuth Gmail accounts use `messages.list/get` for resumable backfill and `history.list` for incremental changes.
+- Expired Gmail history IDs trigger a generation-marked full sync before upstream deletions are reconciled.
 - Periodic metadata-only reconciliation mirrors flags and upstream deletions.
 - PostgreSQL GIN indexes support lexical body and attachment search.
 - Regex is a separate bounded search with scope, pattern, result, and statement-time limits.
@@ -126,4 +128,4 @@ Every account, message, attachment, sync, and send lookup is owner-scoped.
 pytest -q
 ```
 
-The suite covers tenant isolation, tool exposure and annotations, encryption, token tampering, attachment limits, IMAP cursor behavior, and OAuth challenge metadata.
+The suite covers tenant isolation, tool exposure and annotations, encryption, token tampering, attachment limits, IMAP cursor behavior, Gmail history behavior, and OAuth challenge metadata.

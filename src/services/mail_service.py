@@ -8,9 +8,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import HTTPException
-from sqlalchemy import func, or_, select, text
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
+from typing_extensions import TypedDict
 
 from src.config import settings
 from src.handlers.email_handler_types import SendMailInput
@@ -19,6 +20,27 @@ from src.models.email import EmailLog
 from src.models.send_audit import SendAudit
 from src.models.smtp_config import SMTPConfig
 from src.models.user import User
+
+
+class MailAccountDetails(TypedDict):
+    id: int
+    name: str
+    address: str
+    provider: str
+    auth_type: str
+    enabled: bool
+    last_sync: str | None
+    message_count: int
+    attachment_count: int
+
+
+class MailAccountSummary(TypedDict):
+    account_count: int
+    enabled_account_count: int
+    total_message_count: int
+    total_attachment_count: int
+    count_definition: str
+    accounts: list[MailAccountDetails]
 
 
 def owned_account(db: Session, user_id: int, account_id: int) -> SMTPConfig:
@@ -41,6 +63,54 @@ def owned_email(db: Session, user_id: int, email_id: int) -> EmailLog:
     if not message:
         raise HTTPException(status_code=404, detail="Email not found")
     return message
+
+
+def mail_account_summary(db: Session, user: User) -> MailAccountSummary:
+    """Return exact tenant-scoped mailbox inventory without search pagination."""
+    rows = (
+        db.query(
+            SMTPConfig,
+            func.count(EmailLog.id).label("message_count"),
+            func.coalesce(func.sum(EmailLog.attachment_count), 0).label(
+                "attachment_count"
+            ),
+        )
+        .outerjoin(
+            EmailLog,
+            and_(
+                EmailLog.smtp_config_id == SMTPConfig.id,
+                EmailLog.deleted_at.is_(None),
+            ),
+        )
+        .filter(SMTPConfig.owner_user_id == user.id)
+        .group_by(SMTPConfig.id)
+        .order_by(SMTPConfig.id)
+        .all()
+    )
+    accounts = [
+        {
+            "id": account.id,
+            "name": account.name,
+            "address": account.account_name or account.username,
+            "provider": account.provider,
+            "auth_type": account.auth_type,
+            "enabled": account.enabled,
+            "last_sync": account.last_check.isoformat() if account.last_check else None,
+            "message_count": int(message_count),
+            "attachment_count": int(attachment_count),
+        }
+        for account, message_count, attachment_count in rows
+    ]
+    return {
+        "account_count": len(accounts),
+        "enabled_account_count": sum(account["enabled"] for account in accounts),
+        "total_message_count": sum(account["message_count"] for account in accounts),
+        "total_attachment_count": sum(
+            account["attachment_count"] for account in accounts
+        ),
+        "count_definition": "Non-deleted messages currently stored by this server.",
+        "accounts": accounts,
+    }
 
 
 def serialize_attachment(attachment: EmailAttachment, include_text: bool = False) -> dict[str, Any]:

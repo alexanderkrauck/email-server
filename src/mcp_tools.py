@@ -8,12 +8,13 @@ from mcp.types import ToolAnnotations
 from src.config import settings
 from src.database.connection import SessionLocal
 from src.handlers.email_handler_types import SendMailInput
-from src.models.smtp_config import SMTPConfig
 from src.security.auth import current_mcp_user
 from src.security.download_tokens import issue_download_token
 from src.services.attachment_service import owned_attachment
 from src.services.mail_service import (
+    MailAccountSummary,
     get_thread as load_thread,
+    mail_account_summary,
     owned_email,
     search_mail as lexical_search,
     search_mail_regex as regex_search,
@@ -54,28 +55,16 @@ def _date(value: str | None) -> datetime | None:
 def register_mcp_tools(mcp) -> None:
     @mcp.tool(
         name="list_mail_accounts",
-        description="List mail accounts owned by the signed-in user. Credentials are never returned.",
+        description=(
+            "Return exact total message and attachment counts plus every mail account "
+            "owned by the signed-in user. Credentials are never returned."
+        ),
         annotations=READ_ONLY,
     )
-    async def list_mail_accounts() -> list[dict]:
+    async def list_mail_accounts() -> MailAccountSummary:
         user = await current_mcp_user()
         with SessionLocal() as db:
-            accounts = (
-                db.query(SMTPConfig)
-                .filter(SMTPConfig.owner_user_id == user.id, SMTPConfig.enabled.is_(True))
-                .order_by(SMTPConfig.id)
-                .all()
-            )
-            return [
-                {
-                    "id": account.id,
-                    "name": account.name,
-                    "address": account.account_name or account.username,
-                    "provider": account.provider,
-                    "last_sync": account.last_check.isoformat() if account.last_check else None,
-                }
-                for account in accounts
-            ]
+            return mail_account_summary(db, user)
 
     @mcp.tool(
         name="search_mail",

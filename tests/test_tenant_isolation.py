@@ -1,5 +1,7 @@
 """Tenant ownership is applied to account and message lookup IDs."""
 
+from datetime import datetime
+
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import create_engine
@@ -9,7 +11,7 @@ from src.models.base import Base
 from src.models.email import EmailLog
 from src.models.smtp_config import SMTPConfig
 from src.models.user import User
-from src.services.mail_service import owned_account, owned_email
+from src.services.mail_service import mail_account_summary, owned_account, owned_email
 
 
 @pytest.fixture
@@ -68,3 +70,53 @@ def test_cross_tenant_ids_are_not_resolvable(tenant_db):
         owned_email(tenant_db, bob.id, message.id)
     assert account_error.value.status_code == 404
     assert email_error.value.status_code == 404
+
+
+def test_mail_account_summary_has_exact_tenant_scoped_counts(tenant_db):
+    alice = User(google_sub="alice-summary", email="alice@example.com")
+    bob = User(google_sub="bob-summary", email="bob@example.com")
+    tenant_db.add_all([alice, bob])
+    tenant_db.flush()
+    alice_account = _account(alice.id, "Alice")
+    bob_account = _account(bob.id, "Bob")
+    tenant_db.add_all([alice_account, bob_account])
+    tenant_db.flush()
+    tenant_db.add_all(
+        [
+            EmailLog(
+                smtp_config_id=alice_account.id,
+                provider_message_id="alice-1",
+                message_id="<alice-1@example.com>",
+                sender="sender@example.com",
+                recipient="alice@example.com",
+                attachment_count=2,
+            ),
+            EmailLog(
+                smtp_config_id=alice_account.id,
+                provider_message_id="alice-deleted",
+                message_id="<alice-deleted@example.com>",
+                sender="sender@example.com",
+                recipient="alice@example.com",
+                attachment_count=1,
+                deleted_at=datetime(2026, 7, 28, 12, 0, 0),
+            ),
+            EmailLog(
+                smtp_config_id=bob_account.id,
+                provider_message_id="bob-1",
+                message_id="<bob-1@example.com>",
+                sender="sender@example.com",
+                recipient="bob@example.com",
+                attachment_count=4,
+            ),
+        ]
+    )
+    tenant_db.commit()
+
+    summary = mail_account_summary(tenant_db, alice)
+
+    assert summary["account_count"] == 1
+    assert summary["enabled_account_count"] == 1
+    assert summary["total_message_count"] == 1
+    assert summary["total_attachment_count"] == 2
+    assert summary["accounts"][0]["message_count"] == 1
+    assert summary["accounts"][0]["attachment_count"] == 2

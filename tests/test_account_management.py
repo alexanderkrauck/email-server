@@ -1,5 +1,7 @@
 """Account configuration writes remain tenant-scoped and credential-safe."""
 
+from types import SimpleNamespace
+
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import create_engine
@@ -135,3 +137,98 @@ def test_dashboard_route_is_removed():
     from src.server import final_app
 
     assert all(getattr(route, "path", None) != "/dashboard" for route in final_app.routes)
+
+
+def test_gmail_connection_stores_generated_pkce_verifier(monkeypatch):
+    class FakeFlow:
+        code_verifier = None
+
+        def authorization_url(self, **kwargs):
+            self.code_verifier = "generated-code-verifier"
+            return "https://accounts.google.test/authorize", "state"
+
+    monkeypatch.setattr(email_handler, "_gmail_flow", lambda state: FakeFlow())
+    request = SimpleNamespace(session={})
+    user = SimpleNamespace(id=42)
+
+    response = email_handler._start_gmail_connection(request, user)
+
+    assert response.headers["location"] == "https://accounts.google.test/authorize"
+    assert request.session["gmail_connect_user_id"] == 42
+    assert request.session["gmail_oauth_code_verifier"] == "generated-code-verifier"
+
+
+@pytest.mark.asyncio
+async def test_gmail_connection_restores_pkce_verifier_on_callback(
+    account_db,
+    monkeypatch,
+):
+    owner = User(google_sub="gmail-owner", email="owner@example.com")
+    account_db.add(owner)
+    account_db.commit()
+
+    class FakeFlow:
+        def __init__(self):
+            self.code_verifier = None
+            self.credentials = SimpleNamespace(
+                token="access-token",
+                refresh_token="refresh-token",
+            )
+            self.fetch_code = None
+
+        def fetch_token(self, *, code):
+            assert self.code_verifier == "stored-code-verifier"
+            self.fetch_code = code
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "sub": "gmail-provider-subject",
+                "email": "mailbox@gmail.com",
+            }
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, *args, **kwargs):
+            return FakeResponse()
+
+    flow = FakeFlow()
+    monkeypatch.setattr(email_handler, "_gmail_flow", lambda state: flow)
+    monkeypatch.setattr(
+        email_handler.httpx,
+        "AsyncClient",
+        lambda **kwargs: FakeAsyncClient(),
+    )
+    request = SimpleNamespace(
+        session={
+            "gmail_oauth_state": "expected-state",
+            "gmail_connect_user_id": owner.id,
+            "gmail_oauth_code_verifier": "stored-code-verifier",
+        }
+    )
+
+    response = await email_handler.gmail_callback(
+        request=request,
+        code="authorization-code",
+        state="expected-state",
+        db=account_db,
+    )
+
+    account = (
+        account_db.query(SMTPConfig)
+        .filter(SMTPConfig.owner_user_id == owner.id)
+        .one()
+    )
+    assert flow.fetch_code == "authorization-code"
+    assert account.provider == "gmail"
+    assert account.auth_type == "oauth2"
+    assert account.account_name == "mailbox@gmail.com"
+    assert response.status_code == 307

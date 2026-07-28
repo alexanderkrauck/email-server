@@ -1,5 +1,6 @@
 """Authenticated, tenant-scoped HTTP API."""
 
+import asyncio
 import json
 import logging
 import secrets
@@ -335,6 +336,12 @@ def _start_gmail_connection(request: Request, user: User) -> RedirectResponse:
     authorization_url, _ = flow.authorization_url(
         access_type="offline", prompt="consent", include_granted_scopes="true"
     )
+    if not flow.code_verifier:
+        raise HTTPException(
+            status_code=500,
+            detail="Gmail OAuth PKCE initialization failed",
+        )
+    request.session["gmail_oauth_code_verifier"] = flow.code_verifier
     return RedirectResponse(authorization_url)
 
 
@@ -370,11 +377,29 @@ async def gmail_callback(
     if not expected_state or not secrets.compare_digest(state, expected_state):
         raise HTTPException(status_code=400, detail="Invalid OAuth state")
     user_id = request.session.pop("gmail_connect_user_id", None)
+    code_verifier = request.session.pop("gmail_oauth_code_verifier", None)
+    if not code_verifier:
+        raise HTTPException(
+            status_code=400,
+            detail="Gmail connection session expired; start the connection again",
+        )
     user = db.query(User).filter(User.id == user_id, User.status == "active").first()
     if not user:
         raise HTTPException(status_code=401, detail="Account connection session expired")
     flow = _gmail_flow(state)
-    flow.fetch_token(code=code)
+    flow.code_verifier = code_verifier
+    try:
+        await asyncio.to_thread(flow.fetch_token, code=code)
+    except Exception as exc:
+        logger.warning(
+            "Gmail OAuth token exchange failed for user %s: %s",
+            user.id,
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=400,
+            detail="Gmail authorization failed; start the connection again",
+        ) from None
     credentials = flow.credentials
     if not credentials.refresh_token:
         raise HTTPException(status_code=400, detail="Google did not return an offline refresh token")

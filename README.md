@@ -74,10 +74,17 @@ https://mail.example.com/mcp
 
 The server returns an OAuth challenge. Claude discovers the authorization metadata, registers its callback, redirects the user to Google, and then uses the FastMCP-issued audience-bound bearer token.
 
-The Google OAuth application must permit Claude's callback:
+Claude's callback is allowed by the MCP server configuration, not by the Google OAuth client:
 
 ```text
 https://claude.ai/api/mcp/auth_callback
+```
+
+The Google OAuth Web client needs the server callbacks instead:
+
+```text
+https://mail.example.com/auth/callback
+https://mail.example.com/api/v1/accounts/gmail/callback
 ```
 
 ## MCP Tools

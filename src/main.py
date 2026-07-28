@@ -17,6 +17,10 @@ logging.basicConfig(
     ],
 )
 
+# OAuth providers can otherwise log bearer tokens embedded in token-info URLs.
+for logger_name in ("httpx", "httpcore"):
+    logging.getLogger(logger_name).setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 
@@ -35,6 +39,7 @@ def run_server():
         port=settings.api_port,
         reload=settings.api_reload,
         log_level=settings.log_level.lower(),
+        access_log=False,
     )
 
 

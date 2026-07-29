@@ -23,6 +23,51 @@ def test_smtp_config_to_dict():
     assert smtp_client is not None
 
 
+def test_list_parser_accepts_quoted_and_unquoted_mailboxes():
+    from src.email.smtp_client import SMTPClient
+
+    assert SMTPClient._parse_list_response(
+        b'(\\HasChildren) "." INBOX'
+    ) == ({"\\haschildren"}, "INBOX")
+    assert SMTPClient._parse_list_response(
+        b'(\\HasNoChildren \\UnMarked) "." "INBOX.Project - Vienna"'
+    ) == (
+        {"\\hasnochildren", "\\unmarked"},
+        "INBOX.Project - Vienna",
+    )
+    assert SMTPClient._parse_list_response(
+        r'(\HasNoChildren) "/" "Quoted \"Folder\""'
+    ) == ({"\\hasnochildren"}, 'Quoted "Folder"')
+    assert SMTPClient._parse_list_response(b"List completed") is None
+
+
+@pytest.mark.asyncio
+async def test_get_folders_keeps_selectable_unquoted_names(mock_smtp_config):
+    from src.email.smtp_client import SMTPClient
+
+    smtp_client = SMTPClient(mock_smtp_config)
+    smtp_client.client = AsyncMock()
+    smtp_client.client.list.return_value = SimpleNamespace(
+        result="OK",
+        lines=[
+            b'(\\HasChildren) "." INBOX',
+            b'(\\HasNoChildren) "." INBOX.Sent',
+            b'(\\Noselect \\HasChildren) "." INBOX.Projects',
+            b'(\\HasNoChildren) "." "INBOX.Project - Vienna"',
+            b'(\\HasNoChildren) "." INBOX.Sent',
+            b"List completed",
+        ],
+    )
+
+    folders = await smtp_client._get_folders()
+
+    assert folders == [
+        "INBOX",
+        "INBOX.Sent",
+        "INBOX.Project - Vienna",
+    ]
+
+
 @pytest.mark.asyncio
 async def test_ensure_connected_replaces_stale_client(mock_smtp_config):
     """A cached connection is replaced when its NOOP fails."""

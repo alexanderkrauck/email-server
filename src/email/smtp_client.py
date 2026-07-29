@@ -22,6 +22,12 @@ logger = logging.getLogger(__name__)
 class SMTPClient:
     """Client for connecting to SMTP/IMAP servers and fetching emails."""
 
+    LIST_RESPONSE_PATTERN = re.compile(
+        r'^\((?P<flags>[^)]*)\)\s+'
+        r'(?P<delimiter>NIL|"(?:\\.|[^"\\])*")\s+'
+        r"(?P<mailbox>.+)$",
+        flags=re.IGNORECASE,
+    )
     CONNECTION_FIELDS = (
         "host",
         "port",
@@ -219,12 +225,12 @@ class SMTPClient:
 
         folders = []
         for line in list_response.lines:
-            decoded = line.decode("utf-8", errors="ignore")
-            matches = re.findall(r'"([^"]+)"', decoded)
-            if matches and len(matches) >= 2:
-                folder_name = matches[-1]
-                if folder_name not in [".", "/", "\\"]:
-                    folders.append(folder_name)
+            parsed = self._parse_list_response(line)
+            if not parsed:
+                continue
+            flags, folder_name = parsed
+            if "\\noselect" not in flags and folder_name not in folders:
+                folders.append(folder_name)
 
         if not folders:
             folders = ["INBOX"]
@@ -241,6 +247,56 @@ class SMTPClient:
 
         logger.info("Found %s folders for %s: %s", len(folders), self.config.name, folders)
         return folders
+
+    @classmethod
+    def _parse_list_response(
+        cls,
+        line: bytes | bytearray | str,
+    ) -> tuple[set[str], str] | None:
+        """Parse one RFC 3501 LIST response without assuming a quoted mailbox."""
+        if isinstance(line, (bytes, bytearray)):
+            decoded = bytes(line).decode("utf-8", errors="replace")
+        else:
+            decoded = line
+        match = cls.LIST_RESPONSE_PATTERN.match(decoded.strip())
+        if not match:
+            return None
+
+        flags = {
+            flag.casefold()
+            for flag in match.group("flags").split()
+            if flag
+        }
+        mailbox = match.group("mailbox").strip()
+        if mailbox.startswith('"'):
+            mailbox = cls._unquote_imap_string(mailbox)
+            if mailbox is None:
+                return None
+        elif mailbox.startswith("{"):
+            # Literal mailbox names span response lines and are not emitted by
+            # the providers currently supported by this adapter.
+            return None
+        if not mailbox or mailbox.upper() == "NIL":
+            return None
+        return flags, mailbox
+
+    @staticmethod
+    def _unquote_imap_string(value: str) -> str | None:
+        if len(value) < 2 or value[-1] != '"':
+            return None
+        output = []
+        escaped = False
+        for character in value[1:-1]:
+            if escaped:
+                output.append(character)
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            else:
+                output.append(character)
+        if escaped:
+            return None
+        return "".join(output)
 
     async def _fetch_folder(
         self, folder: str, limit: Optional[int] = None, since: Optional[datetime] = None

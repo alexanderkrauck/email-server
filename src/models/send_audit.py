@@ -13,6 +13,11 @@ class SendAudit(Base):
     id = Column(Integer, primary_key=True)
     owner_user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     smtp_config_id = Column(Integer, ForeignKey("smtp_configs.id", ondelete="RESTRICT"), nullable=False)
+    reply_to_email_id = Column(
+        Integer,
+        ForeignKey("email_logs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     idempotency_key = Column(String(255), nullable=False)
     recipients_json = Column(Text, nullable=False)
     subject = Column(Text, nullable=False)

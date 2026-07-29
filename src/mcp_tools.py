@@ -410,7 +410,10 @@ def register_mcp_tools(mcp) -> None:
         name="send_mail",
         description=(
             "Send mail through an owned account. Existing owned attachment IDs are "
-            "refetched and checksum-verified ephemerally. Use a stable idempotency key when retrying."
+            "refetched and checksum-verified ephemerally. For a real reply in the "
+            "existing email thread, pass reply_to_email_id from search_mail/get_mail; "
+            "the same account_id must own that message. Use a stable idempotency key "
+            "when retrying."
         ),
         annotations=WRITE_EXTERNAL,
     )
@@ -419,6 +422,7 @@ def register_mcp_tools(mcp) -> None:
         account_id: int,
         to_addresses: list[str],
         subject: str,
+        reply_to_email_id: int | None = None,
         body_text: str | None = None,
         body_html: str | None = None,
         cc_addresses: list[str] | None = None,
@@ -432,6 +436,7 @@ def register_mcp_tools(mcp) -> None:
             account_id=account_id,
             to_addresses=to_addresses,
             subject=subject,
+            reply_to_email_id=reply_to_email_id,
             body_text=body_text,
             body_html=body_html,
             cc_addresses=cc_addresses or [],

@@ -90,3 +90,31 @@ async def test_invalid_attachment_is_not_silently_omitted(monkeypatch):
         "delivery_state": "failed",
     }
     sender._server.send_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_thread_headers_are_emitted_on_reply():
+    from src.email.smtp_sender import EmailSender
+
+    config = SimpleNamespace(
+        id=1,
+        name="Test",
+        account_name="sender@example.com",
+        username="sender@example.com",
+    )
+    sender = EmailSender(config)
+    sender._server = MagicMock()
+    sender._server.send_message.return_value = {}
+
+    result = await sender.send_email(
+        to_addresses=["recipient@example.com"],
+        subject="Re: Existing thread",
+        body_text="Reply",
+        in_reply_to="<parent@example.com>",
+        references="<root@example.com> <parent@example.com>",
+    )
+
+    message = sender._server.send_message.call_args.args[0]
+    assert result["success"] is True
+    assert message["In-Reply-To"] == "<parent@example.com>"
+    assert message["References"] == "<root@example.com> <parent@example.com>"

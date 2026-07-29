@@ -798,17 +798,13 @@ async def reply_to_email(
         account_id=payload.account_id,
         to_addresses=[original.sender],
         subject=subject,
+        reply_to_email_id=original.id,
         body_text=body_text,
         body_html=payload.body_html,
         cc_addresses=payload.cc_addresses,
         idempotency_key=payload.idempotency_key,
     )
-    return await send_mail(
-        db,
-        user,
-        send_payload,
-        send_options={"in_reply_to": original.message_id, "references": original.references or original.message_id},
-    )
+    return await send_mail(db, user, send_payload)
 
 
 @router.post("/emails/{email_id:int}/forward")

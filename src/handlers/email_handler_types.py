@@ -7,6 +7,7 @@ class SendMailInput(BaseModel):
     account_id: int
     to_addresses: list[EmailStr]
     subject: str = Field(max_length=998)
+    reply_to_email_id: int | None = Field(default=None, ge=1)
     body_text: str | None = None
     body_html: str | None = None
     cc_addresses: list[EmailStr] = Field(default_factory=list)

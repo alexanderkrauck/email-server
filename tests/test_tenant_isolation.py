@@ -1,17 +1,25 @@
 """Tenant ownership is applied to account and message lookup IDs."""
 
 from datetime import datetime
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from src.handlers.email_handler_types import SendMailInput
 from src.models.base import Base
 from src.models.email import EmailLog
+from src.models.send_audit import SendAudit
 from src.models.smtp_config import SMTPConfig
 from src.models.user import User
-from src.services.mail_service import mail_account_summary, owned_account, owned_email
+from src.services.mail_service import (
+    mail_account_summary,
+    owned_account,
+    owned_email,
+    send_mail,
+)
 
 
 @pytest.fixture
@@ -126,3 +134,95 @@ def test_mail_account_summary_has_exact_tenant_scoped_counts(tenant_db):
     assert summary["accounts"][0]["imap_host"] == "imap.example.com"
     assert summary["accounts"][0]["smtp_host"] == "smtp.example.com"
     assert summary["accounts"][0]["credential_configured"] is True
+
+
+@pytest.mark.asyncio
+async def test_threaded_send_resolves_owned_parent_and_appends_reference(
+    tenant_db,
+    monkeypatch,
+):
+    from src.handlers import email_handler
+
+    user = User(google_sub="reply-owner", email="owner@example.com")
+    tenant_db.add(user)
+    tenant_db.flush()
+    account = _account(user.id, "Reply")
+    tenant_db.add(account)
+    tenant_db.flush()
+    original = EmailLog(
+        smtp_config_id=account.id,
+        provider_message_id="INBOX:1:7",
+        message_id="<parent@example.com>",
+        references="<root@example.com>",
+        sender="recipient@example.com",
+        recipient="reply@example.com",
+        subject="Existing thread",
+    )
+    tenant_db.add(original)
+    tenant_db.commit()
+
+    sender = AsyncMock()
+    sender.send_email_via_config.return_value = {
+        "success": True,
+        "delivery_state": "sent",
+        "message_id": "<reply@example.com>",
+    }
+    monkeypatch.setattr(email_handler, "email_sender_manager", sender)
+
+    result = await send_mail(
+        tenant_db,
+        user,
+        SendMailInput(
+            account_id=account.id,
+            to_addresses=["recipient@example.com"],
+            subject="Re: Existing thread",
+            reply_to_email_id=original.id,
+            body_text="Reply",
+            idempotency_key="threaded-reply-test",
+        ),
+    )
+
+    send_args = sender.send_email_via_config.await_args.kwargs
+    audit = tenant_db.query(SendAudit).one()
+    assert send_args["in_reply_to"] == "<parent@example.com>"
+    assert send_args["references"] == "<root@example.com> <parent@example.com>"
+    assert audit.reply_to_email_id == original.id
+    assert result["threaded_reply"] is True
+    assert result["reply_to_email_id"] == original.id
+
+
+@pytest.mark.asyncio
+async def test_threaded_send_rejects_a_different_mailbox(tenant_db):
+    user = User(google_sub="reply-account-owner", email="owner@example.com")
+    tenant_db.add(user)
+    tenant_db.flush()
+    original_account = _account(user.id, "Original")
+    other_account = _account(user.id, "Other")
+    tenant_db.add_all([original_account, other_account])
+    tenant_db.flush()
+    original = EmailLog(
+        smtp_config_id=original_account.id,
+        provider_message_id="INBOX:1:9",
+        message_id="<parent@example.com>",
+        sender="recipient@example.com",
+        recipient="original@example.com",
+        subject="Existing thread",
+    )
+    tenant_db.add(original)
+    tenant_db.commit()
+
+    with pytest.raises(HTTPException) as error:
+        await send_mail(
+            tenant_db,
+            user,
+            SendMailInput(
+                account_id=other_account.id,
+                to_addresses=["recipient@example.com"],
+                subject="Re: Existing thread",
+                reply_to_email_id=original.id,
+                body_text="Reply",
+            ),
+        )
+
+    assert error.value.status_code == 400
+    assert "mailbox" in error.value.detail

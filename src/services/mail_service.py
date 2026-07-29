@@ -1179,6 +1179,37 @@ async def send_mail(
     from src.handlers.email_handler import email_sender_manager
 
     account = owned_account(db, user.id, payload.account_id)
+    reply_message = None
+    effective_send_options = dict(send_options or {})
+    if payload.reply_to_email_id is not None:
+        reply_message = owned_email(db, user.id, payload.reply_to_email_id)
+        if reply_message.smtp_config_id != account.id:
+            raise HTTPException(
+                status_code=400,
+                detail="A threaded reply must use the mailbox that owns the original message",
+            )
+        parent_ids = re.findall(
+            r"<[^<>\s\r\n]{1,253}>",
+            reply_message.message_id or "",
+        )
+        if not parent_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="The original message has no usable RFC Message-ID for threading",
+            )
+        parent_id = parent_ids[0]
+        reference_ids = re.findall(
+            r"<[^<>\s\r\n]{1,253}>",
+            reply_message.references or "",
+        )
+        if parent_id not in reference_ids:
+            reference_ids.append(parent_id)
+        effective_send_options.update(
+            {
+                "in_reply_to": parent_id,
+                "references": " ".join(reference_ids[-100:]),
+            }
+        )
     if not account.credential_ciphertext:
         raise HTTPException(
             status_code=400,
@@ -1211,7 +1242,7 @@ async def send_mail(
         }
         for item in attachments or []
     ]
-    canonical_payload["send_options"] = send_options or {}
+    canonical_payload["send_options"] = effective_send_options
     canonical = json.dumps(canonical_payload, separators=(",", ":"), sort_keys=True)
     request_hash = hashlib.sha256(canonical.encode()).hexdigest()
     key = payload.idempotency_key or str(uuid.uuid4())
@@ -1224,12 +1255,19 @@ async def send_mail(
         if existing.request_hash != request_hash:
             raise HTTPException(status_code=409, detail="Idempotency key was used for a different request")
         if existing.status == "sent":
-            return {"success": True, "idempotent_replay": True, "audit_id": existing.id}
+            return {
+                "success": True,
+                "idempotent_replay": True,
+                "audit_id": existing.id,
+                "threaded_reply": existing.reply_to_email_id is not None,
+                "reply_to_email_id": existing.reply_to_email_id,
+            }
         raise HTTPException(status_code=409, detail=f"Prior send is {existing.status}; it will not be retried")
 
     audit = SendAudit(
         owner_user_id=user.id,
         smtp_config_id=account.id,
+        reply_to_email_id=reply_message.id if reply_message else None,
         idempotency_key=key,
         recipients_json=json.dumps(recipients),
         subject=payload.subject,
@@ -1251,7 +1289,7 @@ async def send_mail(
         bcc_addresses=payload.bcc_addresses or None,
         reply_to=payload.reply_to,
         attachments=attachments,
-        **(send_options or {}),
+        **effective_send_options,
     )
     audit.status = "sent" if result.get("success") else result.get("delivery_state", "failed")
     audit.provider_message_id = result.get("message_id")
@@ -1260,4 +1298,10 @@ async def send_mail(
     db.commit()
     if not result.get("success"):
         raise HTTPException(status_code=502, detail=result.get("message", "SMTP send failed"))
-    return {**result, "audit_id": audit.id, "idempotency_key": key}
+    return {
+        **result,
+        "audit_id": audit.id,
+        "idempotency_key": key,
+        "threaded_reply": reply_message is not None,
+        "reply_to_email_id": reply_message.id if reply_message else None,
+    }

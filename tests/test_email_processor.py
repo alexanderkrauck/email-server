@@ -3,7 +3,7 @@
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from sqlalchemy import create_engine
@@ -181,3 +181,17 @@ def test_shutdown_interruption_does_not_leave_account_in_error(monkeypatch):
         assert account.sync_state == "healthy"
         assert account.last_error_code is None
         assert account.retry_at is None
+
+
+@pytest.mark.asyncio
+async def test_lease_heartbeat_cancels_owner_after_losing_lease(monkeypatch):
+    processor = EmailProcessor()
+    owner_task = Mock()
+    refresh = Mock(return_value=False)
+    monkeypatch.setattr(processor, "_refresh_sync_lease", refresh)
+    monkeypatch.setattr(email_processor.asyncio, "sleep", AsyncMock())
+
+    await processor._maintain_sync_lease(8, owner_task)
+
+    refresh.assert_called_once_with(8)
+    owner_task.cancel.assert_called_once_with()

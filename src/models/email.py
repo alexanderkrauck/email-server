@@ -1,6 +1,6 @@
 """Email model for synced messages."""
 
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -37,6 +37,8 @@ class EmailLog(Base):
     in_reply_to = Column(String(255), nullable=True)
     references = Column(Text, nullable=True)
     content_fingerprint = Column(String(32), nullable=True, index=True)
+    provider_size = Column(BigInteger, nullable=True)
+    content_state = Column(String(32), nullable=False, default="complete")
     deleted_at = Column(DateTime, nullable=True)
     last_seen_sync_generation = Column(Integer, nullable=True)
 

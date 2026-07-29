@@ -3,6 +3,7 @@
 import asyncio
 import concurrent.futures
 import logging
+import multiprocessing
 import resource
 from typing import TYPE_CHECKING, Optional
 
@@ -19,7 +20,12 @@ def _limit_worker() -> None:
     resource.setrlimit(resource.RLIMIT_AS, (memory_limit, memory_limit))
 
 
-_EXTRACTION_POOL = concurrent.futures.ProcessPoolExecutor(max_workers=2, initializer=_limit_worker)
+_EXTRACTION_POOL = concurrent.futures.ProcessPoolExecutor(
+    max_workers=1,
+    initializer=_limit_worker,
+    mp_context=multiprocessing.get_context("spawn"),
+    max_tasks_per_child=25,
+)
 
 
 def _extract_in_worker(data: bytes, content_type: str, config: "StorageConfig") -> str | None:

@@ -90,6 +90,7 @@ def test_mail_account_summary_has_exact_tenant_scoped_counts(tenant_db):
                 sender="sender@example.com",
                 recipient="alice@example.com",
                 attachment_count=2,
+                content_state="headers_only",
             ),
             EmailLog(
                 smtp_config_id=alice_account.id,
@@ -118,8 +119,10 @@ def test_mail_account_summary_has_exact_tenant_scoped_counts(tenant_db):
     assert summary["enabled_account_count"] == 1
     assert summary["total_message_count"] == 1
     assert summary["total_attachment_count"] == 2
+    assert summary["total_partial_message_count"] == 1
     assert summary["accounts"][0]["message_count"] == 1
     assert summary["accounts"][0]["attachment_count"] == 2
+    assert summary["accounts"][0]["partial_message_count"] == 1
     assert summary["accounts"][0]["imap_host"] == "imap.example.com"
     assert summary["accounts"][0]["smtp_host"] == "smtp.example.com"
     assert summary["accounts"][0]["credential_configured"] is True

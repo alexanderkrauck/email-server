@@ -36,8 +36,9 @@ class Settings(BaseSettings):
     gmail_history_pages_per_cycle: int = 20
     gmail_request_concurrency: int = 10
     imap_backfill_messages_per_cycle: int = 500
+    imap_max_message_size: int = 50 * 1024 * 1024
     sync_account_concurrency: int = 4
-    sync_lease_seconds: int = 1800
+    sync_lease_seconds: int = 120
     sync_stale_after_seconds: int = 900
 
     # Attachment Settings

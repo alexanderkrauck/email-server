@@ -11,6 +11,13 @@ def test_text_extractor_initialization():
     assert extractor is not None
 
 
+def test_extraction_pool_is_single_spawned_worker():
+    from src.email import text_extractor
+
+    assert text_extractor._EXTRACTION_POOL._max_workers == 1
+    assert text_extractor._EXTRACTION_POOL._mp_context.get_start_method() == "spawn"
+
+
 @pytest.mark.asyncio
 async def test_extract_plain_text():
     """Test extracting plain text."""

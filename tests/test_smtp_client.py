@@ -157,11 +157,27 @@ async def test_fetch_folder_uses_date_then_uid_checkpoint(mock_smtp_config, samp
     smtp_client.client.fetch.side_effect = [
         SimpleNamespace(
             result="OK",
-            lines=[b"7 FETCH (UID 42 RFC822 {100}", sample_raw_email, b")"],
+            lines=[b"7 FETCH (UID 42 RFC822.SIZE 100)"],
         ),
         SimpleNamespace(
             result="OK",
-            lines=[b"8 FETCH (UID 43 RFC822 {100}", sample_raw_email, b")"],
+            lines=[
+                b"7 FETCH (UID 42 RFC822.SIZE 100 RFC822 {100}",
+                sample_raw_email,
+                b")",
+            ],
+        ),
+        SimpleNamespace(
+            result="OK",
+            lines=[b"8 FETCH (UID 43 RFC822.SIZE 100)"],
+        ),
+        SimpleNamespace(
+            result="OK",
+            lines=[
+                b"8 FETCH (UID 43 RFC822.SIZE 100 RFC822 {100}",
+                sample_raw_email,
+                b")",
+            ],
         ),
     ]
 
@@ -180,7 +196,7 @@ async def test_fetch_folder_uses_date_then_uid_checkpoint(mock_smtp_config, samp
     assert smtp_client._last_uids["INBOX"] == 43
     assert smtp_client.client.search.await_args_list[0].args == ("SINCE", "25-Jul-2026")
     assert smtp_client.client.search.await_args_list[1].args == ("UID", "43:*")
-    assert smtp_client.client.fetch.await_count == 2
+    assert smtp_client.client.fetch.await_count == 4
 
 
 def test_extract_raw_email_accepts_bytearray_payload():
@@ -202,7 +218,13 @@ async def test_fetch_error_does_not_advance_uid_checkpoint(mock_smtp_config):
     smtp_client.client = AsyncMock()
     smtp_client.client.select.return_value = SimpleNamespace(result="OK", lines=[])
     smtp_client.client.search.return_value = SimpleNamespace(result="OK", lines=[b"7"])
-    smtp_client.client.fetch.side_effect = TimeoutError
+    smtp_client.client.fetch.side_effect = [
+        SimpleNamespace(
+            result="OK",
+            lines=[b"7 FETCH (UID 42 RFC822.SIZE 100)"],
+        ),
+        TimeoutError,
+    ]
 
     with pytest.raises(TimeoutError):
         _ = [batch async for batch in smtp_client._fetch_folder("INBOX")]
@@ -242,22 +264,47 @@ async def test_bounded_backfill_fetches_oldest_uids_without_skipping(
     smtp_client.client.fetch.side_effect = [
         SimpleNamespace(
             result="OK",
-            lines=[b"1 FETCH (UID 10 RFC822 {100}", sample_raw_email, b")"],
+            lines=[
+                b"1 FETCH (UID 10 RFC822.SIZE 100)",
+                b"2 FETCH (UID 11 RFC822.SIZE 100)",
+            ],
         ),
         SimpleNamespace(
             result="OK",
-            lines=[b"2 FETCH (UID 11 RFC822 {100}", sample_raw_email, b")"],
+            lines=[
+                b"1 FETCH (UID 10 RFC822.SIZE 100 RFC822 {100}",
+                sample_raw_email,
+                b")",
+            ],
         ),
         SimpleNamespace(
             result="OK",
-            lines=[b"3 FETCH (UID 12 RFC822 {100}", sample_raw_email, b")"],
+            lines=[
+                b"2 FETCH (UID 11 RFC822.SIZE 100 RFC822 {100}",
+                sample_raw_email,
+                b")",
+            ],
+        ),
+        SimpleNamespace(
+            result="OK",
+            lines=[b"3 FETCH (UID 12 RFC822.SIZE 100)"],
+        ),
+        SimpleNamespace(
+            result="OK",
+            lines=[
+                b"3 FETCH (UID 12 RFC822.SIZE 100 RFC822 {100}",
+                sample_raw_email,
+                b")",
+            ],
         ),
     ]
 
     first = [
         batch async for batch in smtp_client._fetch_folder("INBOX", limit=2)
     ]
-    assert [message["imap_uid"] for message in first[0]] == [10, 11]
+    assert [
+        message["imap_uid"] for batch in first for message in batch
+    ] == [10, 11]
     assert smtp_client._last_uids["INBOX"] == 11
     assert smtp_client._folder_backfill_complete["INBOX"] is False
 
@@ -298,7 +345,15 @@ async def test_uidvalidity_change_resets_folder_backfill(
     smtp_client.client.fetch.side_effect = [
         SimpleNamespace(
             result="OK",
-            lines=[b"1 FETCH (UID 1 RFC822 {100}", sample_raw_email, b")"],
+            lines=[b"1 FETCH (UID 1 RFC822.SIZE 100)"],
+        ),
+        SimpleNamespace(
+            result="OK",
+            lines=[
+                b"1 FETCH (UID 1 RFC822.SIZE 100 RFC822 {100}",
+                sample_raw_email,
+                b")",
+            ],
         ),
     ]
 
@@ -310,6 +365,63 @@ async def test_uidvalidity_change_resets_folder_backfill(
     assert smtp_client.client.search.await_args.args == ("ALL",)
     assert smtp_client._last_uids["INBOX"] == 1
     assert smtp_client._folder_backfill_complete["INBOX"] is False
+
+
+@pytest.mark.asyncio
+async def test_oversized_message_fetches_headers_only(
+    monkeypatch,
+    mock_smtp_config,
+):
+    from src.config import settings
+    from src.email.smtp_client import SMTPClient
+
+    monkeypatch.setattr(settings, "imap_max_message_size", 1_000)
+    smtp_client = SMTPClient(mock_smtp_config)
+    smtp_client.client = AsyncMock()
+    smtp_client.client.select.return_value = SimpleNamespace(
+        result="OK",
+        lines=[
+            b"* OK [UIDVALIDITY 123] UIDs valid",
+            b"* OK [UIDNEXT 43] Predicted next UID",
+        ],
+    )
+    smtp_client.client.search.return_value = SimpleNamespace(
+        result="OK",
+        lines=[b"7"],
+    )
+    header = (
+        b"From: sender@example.com\r\n"
+        b"To: recipient@example.com\r\n"
+        b"Subject: Large message\r\n"
+        b"Message-ID: <large@example.com>\r\n\r\n"
+    )
+    smtp_client.client.fetch.side_effect = [
+        SimpleNamespace(
+            result="OK",
+            lines=[b"7 FETCH (UID 42 RFC822.SIZE 2000)"],
+        ),
+        SimpleNamespace(
+            result="OK",
+            lines=[
+                b"7 FETCH (UID 42 RFC822.SIZE 2000 BODY[HEADER] {120}",
+                header,
+                b")",
+            ],
+        ),
+    ]
+
+    batches = [batch async for batch in smtp_client._fetch_folder("INBOX")]
+
+    message = batches[0][0]
+    assert message["provider_size"] == 2_000
+    assert message["content_state"] == "headers_only"
+    assert message["subject"] == "Large message"
+    assert message["body_plain"] == ""
+    assert message["attachment_count"] == 0
+    assert smtp_client.client.fetch.await_args_list[1].args == (
+        "7",
+        "(UID FLAGS RFC822.SIZE BODY.PEEK[HEADER])",
+    )
 
 
 @pytest.mark.asyncio

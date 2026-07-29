@@ -50,6 +50,7 @@ class MailAccountDetails(TypedDict):
     last_sync: str | None
     message_count: int
     attachment_count: int
+    partial_message_count: int
 
 
 class MailAccountSummary(TypedDict):
@@ -57,6 +58,7 @@ class MailAccountSummary(TypedDict):
     enabled_account_count: int
     total_message_count: int
     total_attachment_count: int
+    total_partial_message_count: int
     count_definition: str
     accounts: list[MailAccountDetails]
 
@@ -105,6 +107,15 @@ def mail_account_summary(db: Session, user: User) -> MailAccountSummary:
             func.coalesce(func.sum(EmailLog.attachment_count), 0).label(
                 "attachment_count"
             ),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (EmailLog.content_state != "complete", 1),
+                        else_=0,
+                    )
+                ),
+                0,
+            ).label("partial_message_count"),
         )
         .outerjoin(
             EmailLog,
@@ -151,8 +162,9 @@ def mail_account_summary(db: Session, user: User) -> MailAccountSummary:
             "last_sync": account.last_check.isoformat() if account.last_check else None,
             "message_count": int(message_count),
             "attachment_count": int(attachment_count),
+            "partial_message_count": int(partial_message_count),
         }
-        for account, message_count, attachment_count in rows
+        for account, message_count, attachment_count, partial_message_count in rows
     ]
     return {
         "account_count": len(accounts),
@@ -161,7 +173,14 @@ def mail_account_summary(db: Session, user: User) -> MailAccountSummary:
         "total_attachment_count": sum(
             account["attachment_count"] for account in accounts
         ),
-        "count_definition": "Non-deleted messages currently stored by this server.",
+        "total_partial_message_count": sum(
+            account["partial_message_count"] for account in accounts
+        ),
+        "count_definition": (
+            "Non-deleted messages currently stored by this server. "
+            "partial_message_count is indexed from headers only because the "
+            "provider message exceeded the configured safe fetch limit."
+        ),
         "accounts": accounts,
     }
 
@@ -201,6 +220,8 @@ def serialize_email(
         "message_id": message.message_id,
         "thread_id": message.provider_thread_id,
         "email_date": message.email_date.isoformat() if message.email_date else None,
+        "provider_size": message.provider_size,
+        "content_state": message.content_state,
         "attachment_count": message.attachment_count,
         "attachments": [
             serialize_attachment(item, include_text=include_attachment_text) for item in message.attachments

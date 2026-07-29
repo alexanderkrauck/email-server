@@ -165,7 +165,10 @@ class SMTPClient:
 
         return await self.connect()
 
-    BATCH_SIZE = 10
+    # Raw RFC822 messages can be large and remain referenced while the caller
+    # commits a yielded batch. Keep only one message in flight per mailbox.
+    BATCH_SIZE = 1
+    METADATA_BATCH_SIZE = 200
 
     async def fetch_new_emails(self, limit: Optional[int] = None, since: Optional[datetime] = None):
         """Fetch new emails from all folders, yielding batches of BATCH_SIZE.
@@ -364,11 +367,24 @@ class SMTPClient:
             " ".join(search_criteria),
         )
 
+        message_sizes = await self._fetch_message_sizes(message_ids)
+        from src.config import settings
+
         batch = []
         highest_uid = last_uid
         for i, msg_id in enumerate(message_ids):
             try:
-                fetch_response = await self.client.fetch(msg_id, "(UID FLAGS RFC822)")
+                provider_size = message_sizes.get(msg_id)
+                headers_only = (
+                    provider_size is not None
+                    and provider_size > settings.imap_max_message_size
+                )
+                fetch_items = (
+                    "(UID FLAGS RFC822.SIZE BODY.PEEK[HEADER])"
+                    if headers_only
+                    else "(UID FLAGS RFC822.SIZE RFC822)"
+                )
+                fetch_response = await self.client.fetch(msg_id, fetch_items)
                 if fetch_response.result == "OK":
                     raw_email = self._extract_raw_email(fetch_response.lines)
                     message_uid = self._extract_message_uid(fetch_response.lines)
@@ -383,6 +399,22 @@ class SMTPClient:
                         flags=self._extract_flags(fetch_response.lines),
                     )
                     if email_data:
+                        email_data["provider_size"] = provider_size or len(raw_email)
+                        email_data["content_state"] = (
+                            "headers_only" if headers_only else "complete"
+                        )
+                        if headers_only:
+                            email_data["body_plain"] = ""
+                            email_data["body_html"] = ""
+                            email_data["attachment_count"] = 0
+                            logger.warning(
+                                "Indexed headers only for oversized message UID %s "
+                                "in %s (%s bytes; limit %s)",
+                                message_uid or msg_id,
+                                folder,
+                                provider_size,
+                                settings.imap_max_message_size,
+                            )
                         batch.append(email_data)
                     if message_uid is not None:
                         highest_uid = max(highest_uid or 0, message_uid)
@@ -418,6 +450,28 @@ class SMTPClient:
             self._folder_backfill_complete[folder] = True
         else:
             self._folder_backfill_complete[folder] = False
+
+    async def _fetch_message_sizes(self, message_ids: List[str]) -> Dict[str, int]:
+        """Fetch RFC822 sizes in bounded metadata-only commands."""
+        sizes = {}
+        for offset in range(0, len(message_ids), self.METADATA_BATCH_SIZE):
+            chunk = message_ids[offset : offset + self.METADATA_BATCH_SIZE]
+            sequence_set = ",".join(chunk)
+            response = await self.client.fetch(sequence_set, "(UID RFC822.SIZE)")
+            if response.result != "OK":
+                raise RuntimeError(
+                    f"Failed to fetch message sizes for {self.config.name}"
+                )
+            for line in response.lines:
+                if not isinstance(line, bytes):
+                    continue
+                sequence_match = re.match(rb"^(\d+)\s+FETCH\b", line)
+                size_match = re.search(rb"\bRFC822\.SIZE\s+(\d+)\b", line)
+                if sequence_match and size_match:
+                    sizes[sequence_match.group(1).decode("ascii")] = int(
+                        size_match.group(1)
+                    )
+        return sizes
 
     @staticmethod
     def _format_imap_date(value: datetime) -> str:

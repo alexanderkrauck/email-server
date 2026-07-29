@@ -1,6 +1,7 @@
 """Email processing and orchestration."""
 
 import asyncio
+import contextlib
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -106,6 +107,7 @@ class EmailProcessor:
         config_id = config.id
         completed = False
         lock_token = None
+        heartbeat_task = None
 
         try:
             retry_after = config.retry_at
@@ -119,6 +121,12 @@ class EmailProcessor:
                 return False
             self._active_lock_tokens[config_id] = lock_token
             self._mark_sync_attempt(config_id)
+            heartbeat_task = asyncio.create_task(
+                self._maintain_sync_lease(
+                    config_id,
+                    asyncio.current_task(),
+                )
+            )
 
             if config.provider == "gmail" and config.auth_type == "oauth2":
                 await self._process_gmail_api(config)
@@ -144,7 +152,6 @@ class EmailProcessor:
                     if batch:
                         await self._update_server_stats(config, len(batch))
                         self._persist_sync_cursors(batch)
-                        self._refresh_sync_lease(config_id)
                 self._persist_client_cursors(config_id, client)
                 with get_db_session() as db:
                     db_account = (
@@ -186,6 +193,10 @@ class EmailProcessor:
                 retry_seconds,
             )
         finally:
+            if heartbeat_task:
+                heartbeat_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await heartbeat_task
             if completed:
                 try:
                     self._mark_sync_success(config_id)
@@ -239,24 +250,53 @@ class EmailProcessor:
             )
         return token if updated else None
 
-    def _refresh_sync_lease(self, config_id: int) -> None:
+    def _refresh_sync_lease(self, config_id: int) -> bool:
         from src.config import settings
 
         token = self._active_lock_tokens.get(config_id)
         if not token:
-            return
+            return False
         now = datetime.now(tz=timezone.utc)
         with SessionLocal.begin() as db:
-            db.query(SMTPConfig).filter(
-                SMTPConfig.id == config_id,
-                SMTPConfig.sync_lock_token == token,
-            ).update(
-                {
-                    SMTPConfig.sync_lock_expires_at: now
-                    + timedelta(seconds=settings.sync_lease_seconds)
-                },
-                synchronize_session=False,
+            updated = (
+                db.query(SMTPConfig)
+                .filter(
+                    SMTPConfig.id == config_id,
+                    SMTPConfig.sync_lock_token == token,
+                )
+                .update(
+                    {
+                        SMTPConfig.sync_lock_expires_at: now
+                        + timedelta(seconds=settings.sync_lease_seconds)
+                    },
+                    synchronize_session=False,
+                )
             )
+        return bool(updated)
+
+    async def _maintain_sync_lease(
+        self,
+        config_id: int,
+        owner_task: asyncio.Task | None,
+    ) -> None:
+        """Refresh a live lease independently of slow provider operations."""
+        from src.config import settings
+
+        interval = max(1.0, min(30.0, settings.sync_lease_seconds / 3))
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                if not self._refresh_sync_lease(config_id):
+                    logger.error("Lost synchronization lease for account %s", config_id)
+                    if owner_task:
+                        owner_task.cancel()
+                    return
+            except Exception as exc:
+                logger.warning(
+                    "Could not refresh synchronization lease for account %s: %s",
+                    config_id,
+                    exc,
+                )
 
     @staticmethod
     def _release_sync_lease(config_id: int, token: str) -> None:
@@ -486,9 +526,6 @@ class EmailProcessor:
                     message["last_seen_sync_generation"] = sync_generation
                 messages.append(message)
             await self._process_emails(messages)
-            client_config = getattr(client, "config", None)
-            if client_config is not None:
-                self._refresh_sync_lease(client_config.id)
             processed_count += len(messages)
         return processed_count, missing
 
@@ -602,6 +639,14 @@ class EmailProcessor:
                         )
                         existing_email.folder = sanitize_db_text(email_data.get("folder"))
                         existing_email.flags = sanitize_db_text(email_data.get("flags"))
+                        existing_email.provider_size = (
+                            email_data.get("provider_size")
+                            or existing_email.provider_size
+                        )
+                        existing_email.content_state = email_data.get(
+                            "content_state",
+                            existing_email.content_state,
+                        )
                         existing_email.deleted_at = None
                         if email_data.get("last_seen_sync_generation") is not None:
                             existing_email.last_seen_sync_generation = email_data[
@@ -637,6 +682,11 @@ class EmailProcessor:
                         legacy_email.imap_uid = email_data.get("imap_uid")
                         legacy_email.uid_validity = email_data.get("uid_validity")
                         legacy_email.flags = sanitize_db_text(email_data.get("flags"))
+                        legacy_email.provider_size = email_data.get("provider_size")
+                        legacy_email.content_state = email_data.get(
+                            "content_state",
+                            "complete",
+                        )
                         legacy_email.last_seen_sync_generation = email_data.get(
                             "last_seen_sync_generation"
                         )
@@ -682,6 +732,8 @@ class EmailProcessor:
                             email_data.get("subject"),
                             body_plain,
                         ),
+                        provider_size=email_data.get("provider_size"),
+                        content_state=email_data.get("content_state", "complete"),
                         last_seen_sync_generation=email_data.get(
                             "last_seen_sync_generation"
                         ),

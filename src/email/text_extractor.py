@@ -154,8 +154,9 @@ class TextExtractor:
             doc = docx.Document(BytesIO(data))
             text_parts = [para.text for para in doc.paragraphs]
             for table in doc.tables:
-                for row in table.rows:
-                    text_parts.append("\t".join(cell.text for cell in row.cells))
+                text_parts.extend(
+                    "\t".join(cell.text for cell in row.cells) for row in table.rows
+                )
             for section in doc.sections:
                 text_parts.extend(para.text for para in section.header.paragraphs)
                 text_parts.extend(para.text for para in section.footer.paragraphs)
@@ -177,9 +178,7 @@ class TextExtractor:
                     from bs4 import BeautifulSoup
 
                     soup = BeautifulSoup(content, "xml")
-                    for p in soup.find_all("p"):
-                        if p.text:
-                            text_parts.append(p.text)
+                    text_parts.extend(p.text for p in soup.find_all("p") if p.text)
             return "\n".join(text_parts)
         except Exception as e:
             logger.warning("ODT extraction failed: %s", e)
@@ -197,9 +196,7 @@ class TextExtractor:
             for sheet in wb.sheetnames:
                 ws = wb[sheet]
                 for row in ws.iter_rows():
-                    for cell in row:
-                        if cell.value:
-                            text_parts.append(str(cell.value))
+                    text_parts.extend(str(cell.value) for cell in row if cell.value)
             return "\n".join(text_parts)
         except Exception as e:
             logger.warning("XLSX extraction failed: %s", e)
@@ -218,9 +215,9 @@ class TextExtractor:
                     from bs4 import BeautifulSoup
 
                     soup = BeautifulSoup(content, "xml")
-                    for cell in soup.find_all("cell"):
-                        if cell.text:
-                            text_parts.append(cell.text)
+                    text_parts.extend(
+                        cell.text for cell in soup.find_all("cell") if cell.text
+                    )
             return "\n".join(text_parts)
         except Exception as e:
             logger.warning("ODS extraction failed: %s", e)
@@ -236,9 +233,9 @@ class TextExtractor:
             prs = Presentation(BytesIO(data))
             text_parts = []
             for slide in prs.slides:
-                for shape in slide.shapes:
-                    if hasattr(shape, "text"):
-                        text_parts.append(shape.text)
+                text_parts.extend(
+                    shape.text for shape in slide.shapes if hasattr(shape, "text")
+                )
             return "\n".join(text_parts)
         except Exception as e:
             logger.warning("PPTX extraction failed: %s", e)

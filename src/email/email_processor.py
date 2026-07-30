@@ -518,7 +518,7 @@ class EmailProcessor:
                 *(client.get_parsed_message(message_id) for message_id in chunk_ids)
             )
             messages = []
-            for message_id, message in zip(chunk_ids, fetched):
+            for message_id, message in zip(chunk_ids, fetched, strict=True):
                 if message is None:
                     missing.add(message_id)
                     continue

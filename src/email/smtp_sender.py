@@ -1,9 +1,9 @@
 """SMTP email sending functionality."""
 
+import base64
 import logging
 import smtplib
 import ssl
-import base64
 from datetime import datetime, timezone
 from email import encoders
 from email.mime.base import MIMEBase

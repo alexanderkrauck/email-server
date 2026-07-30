@@ -17,6 +17,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY alembic.ini .
 COPY alembic/ ./alembic/
 COPY src/ ./src/
+# Read-only post-deploy verification, run with `docker compose exec`.
+COPY scripts/ ./scripts/
 
 # Create non-root user
 RUN adduser -D -u 1000 emailserver \

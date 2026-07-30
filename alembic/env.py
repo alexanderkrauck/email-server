@@ -1,10 +1,10 @@
 """Alembic migration environment."""
 
-from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from src.models.base import Base
 import src.models  # noqa: F401
+from alembic import context
+from src.models.base import Base
 
 config = context.config
 target_metadata = Base.metadata
@@ -16,9 +16,10 @@ MIGRATION_MANAGED_INDEXES = {
 
 def include_object(obj, name, type_, reflected, compare_to):
     """Keep raw PostgreSQL expression indexes under explicit migration control."""
-    if type_ == "index" and reflected and name in MIGRATION_MANAGED_INDEXES:
-        return False
-    return True
+    is_reflected_managed_index = (
+        type_ == "index" and reflected and name in MIGRATION_MANAGED_INDEXES
+    )
+    return not is_reflected_managed_index
 
 
 def run_migrations_offline() -> None:

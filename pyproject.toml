@@ -1,0 +1,48 @@
+# Tooling configuration only. The service runs as `python -m src.main` and is
+# not installed as a distribution, so there is deliberately no build backend.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = ["error::DeprecationWarning:src.*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+exclude = ["alembic/versions", ".venv"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle
+    "F",    # pyflakes
+    "I",    # import sorting
+    "B",    # bugbear
+    "SIM",  # simplify
+    "PERF", # performance
+    "DTZ",  # timezone-aware datetimes
+    "S",    # bandit
+]
+# Next tightening step: enable "UP" (pyupgrade). It is clean apart from ~53
+# typing.Optional/List and timezone.utc sites that deserve their own commit.
+ignore = [
+    "E501",  # line length is formatter territory
+    "S101",  # asserts are how the suite is written
+    "S104",  # the container binds 0.0.0.0; Docker maps it to loopback
+]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI dependency injection is expressed as call-valued defaults.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Body",
+    "fastapi.Header",
+    "fastapi.Form",
+    "fastapi.File",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S105", "S106", "S108", "DTZ001"]
+"scripts/*" = ["S608"]

@@ -1,7 +1,7 @@
 """Email attachment handling."""
 
-import logging
 import hashlib
+import logging
 import mimetypes
 from email import message_from_bytes
 from typing import TYPE_CHECKING, List, Optional

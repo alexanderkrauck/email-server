@@ -1,7 +1,6 @@
 """Authenticated, tenant-scoped HTTP API."""
 
 import asyncio
-import json
 import logging
 import secrets
 from datetime import datetime

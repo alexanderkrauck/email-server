@@ -29,15 +29,23 @@ from src.services.attachment_service import (
 from src.services.mail_service import (
     MailAccountSummary,
     SearchPage,
-    get_thread as load_thread,
     mail_account_summary,
     owned_account,
     owned_email,
-    search_mail as lexical_search,
-    search_mail_regex as regex_search,
-    send_mail as send_message,
     serialize_attachment,
     serialize_email,
+)
+from src.services.mail_service import (
+    get_thread as load_thread,
+)
+from src.services.mail_service import (
+    search_mail as lexical_search,
+)
+from src.services.mail_service import (
+    search_mail_regex as regex_search,
+)
+from src.services.mail_service import (
+    send_mail as send_message,
 )
 
 READ_ONLY = ToolAnnotations(

@@ -53,8 +53,9 @@ async def test_mcp_tool_surface_is_narrow_and_annotated():
 
 
 def test_password_is_write_only_in_account_tools():
-    from src.server import mcp
     import asyncio
+
+    from src.server import mcp
 
     tools = asyncio.run(mcp.list_tools())
     tools_by_name = {tool.name: tool for tool in tools}

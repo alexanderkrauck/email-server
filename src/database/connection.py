@@ -4,11 +4,11 @@ import logging
 from contextlib import contextmanager
 from pathlib import Path
 
-from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from alembic import command
 from src.config import settings
 
 logger = logging.getLogger(__name__)

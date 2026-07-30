@@ -1,7 +1,7 @@
 """Tests for SMTP client - simplified to avoid connection issues."""
 
-from datetime import datetime, timezone
 from dataclasses import replace
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 

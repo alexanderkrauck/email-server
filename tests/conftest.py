@@ -1,7 +1,9 @@
 """Test configuration and fixtures."""
 
 import os
+import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -14,6 +16,15 @@ else:
     )
 os.environ.setdefault("EMAILSERVER_API_HOST", "0.0.0.0")
 os.environ.setdefault("EMAILSERVER_API_PORT", "8000")
+
+# Generated signing and encryption material must never touch the deployment's
+# /data volume, so the suite runs from a clean clone without Docker.
+_test_data_dir = Path(tempfile.mkdtemp(prefix="emailserver-test-data-"))
+os.environ.setdefault("EMAILSERVER_DATA_DIR", str(_test_data_dir))
+
+# pydantic-settings reads a real .env before the environment above. A developer's
+# private deployment file must not decide what the suite asserts.
+os.environ.setdefault("EMAILSERVER_AUTH_MODE", "development")
 
 
 @pytest.fixture

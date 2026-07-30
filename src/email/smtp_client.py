@@ -7,8 +7,7 @@ import logging
 import re
 import ssl
 from datetime import datetime, timezone
-from email import policy
-from email import message_from_bytes
+from email import message_from_bytes, policy
 from email.utils import getaddresses, parsedate_to_datetime
 from typing import Dict, List, Optional
 
@@ -257,10 +256,11 @@ class SMTPClient:
         line: bytes | bytearray | str,
     ) -> tuple[set[str], str] | None:
         """Parse one RFC 3501 LIST response without assuming a quoted mailbox."""
-        if isinstance(line, (bytes, bytearray)):
-            decoded = bytes(line).decode("utf-8", errors="replace")
-        else:
-            decoded = line
+        decoded = (
+            bytes(line).decode("utf-8", errors="replace")
+            if isinstance(line, (bytes, bytearray))
+            else line
+        )
         match = cls.LIST_RESPONSE_PATTERN.match(decoded.strip())
         if not match:
             return None

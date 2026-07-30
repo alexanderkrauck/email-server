@@ -56,8 +56,11 @@ class Settings(BaseSettings):
     extract_other_text: bool = True
 
     # Security and identity
-    # Development mode is safe only while Docker binds the service to loopback.
-    auth_mode: Literal["development", "google"] = "development"
+    # development  loopback only, no token. Safe only while Docker binds to loopback.
+    # single_user  one owner authenticated by a static bearer token.
+    # google       multi-user Google OAuth with dynamic client registration.
+    auth_mode: Literal["development", "single_user", "google"] = "development"
+    api_token: str = ""
     public_base_url: str = "http://localhost:8002"
     google_client_id: str = ""
     google_client_secret: str = ""

@@ -15,6 +15,8 @@ from src.database.connection import init_database
 from src.handlers.email_handler import (
     email_processor,
     email_sender_manager,
+)
+from src.handlers.email_handler import (
     router as email_router,
 )
 from src.mcp_tools import register_mcp_tools
@@ -78,9 +80,8 @@ mcp_app = mcp.http_app(path="/mcp", stateless_http=True)
 
 @asynccontextmanager
 async def combined_lifespan(app: FastAPI):
-    async with service_lifespan(app):
-        async with mcp_app.lifespan(app):
-            yield
+    async with service_lifespan(app), mcp_app.lifespan(app):
+        yield
 
 
 final_app = FastAPI(
@@ -92,7 +93,7 @@ final_app = FastAPI(
 final_app.add_middleware(
     SessionMiddleware,
     secret_key=persistent_secret(settings.session_secret, "session.key"),
-    https_only=settings.auth_mode == "google",
+    https_only=settings.auth_mode != "development",
     same_site="lax",
 )
 final_app.mount("/api/v1", api_app)

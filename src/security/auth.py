@@ -1,7 +1,8 @@
 """Google-backed MCP identity and tenant principal resolution."""
 
-import logging
 import asyncio
+import logging
+import secrets
 from dataclasses import dataclass
 from typing import Any
 
@@ -19,6 +20,10 @@ logger = logging.getLogger(__name__)
 bearer_scheme = HTTPBearer(auto_error=False)
 _mcp_auth_provider = None
 
+# A static token is the only secret protecting a single-user deployment.
+MIN_API_TOKEN_LENGTH = 32
+SINGLE_USER_CLIENT_ID = "single-user"
+
 
 @dataclass(frozen=True)
 class IdentityClaims:
@@ -28,10 +33,31 @@ class IdentityClaims:
 
 
 def build_mcp_auth_provider():
-    """Build FastMCP's OAuth proxy when Google authentication is enabled."""
+    """Build the MCP token verifier that matches the configured authentication mode."""
     global _mcp_auth_provider
-    if settings.auth_mode != "google":
+    if settings.auth_mode == "development":
         return None
+
+    if settings.auth_mode == "single_user":
+        if len(settings.api_token) < MIN_API_TOKEN_LENGTH:
+            raise RuntimeError(
+                "single_user auth requires EMAILSERVER_API_TOKEN of at least "
+                f"{MIN_API_TOKEN_LENGTH} characters"
+            )
+        from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
+
+        _mcp_auth_provider = StaticTokenVerifier(
+            tokens={
+                settings.api_token: {
+                    "client_id": SINGLE_USER_CLIENT_ID,
+                    "sub": settings.bootstrap_user_sub,
+                    "email": settings.bootstrap_user_email,
+                    "scopes": [],
+                }
+            }
+        )
+        return _mcp_auth_provider
+
     if not settings.google_client_id or not settings.google_client_secret:
         raise RuntimeError("Google auth requires EMAILSERVER_GOOGLE_CLIENT_ID and EMAILSERVER_GOOGLE_CLIENT_SECRET")
 
@@ -56,7 +82,7 @@ def _claims_from_mapping(claims: dict[str, Any], subject: str | None = None) -> 
     sub = str(claims.get("sub") or subject or "")
     email = str(claims.get("email") or "")
     email_verified = claims.get("email_verified", True)
-    if email_verified in {False, "false", "False", 0, "0"}:
+    if email_verified in {False, "false", "False", "0"}:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Google email is not verified")
     if not sub or not email:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authenticated identity lacks sub or email")
@@ -106,7 +132,8 @@ def resolve_user(db: Session, claims: IdentityClaims) -> User:
     return user
 
 
-def development_user(db: Session) -> User:
+def local_owner_user(db: Session) -> User:
+    """Resolve the single implicit owner used by development and single_user modes."""
     user = db.query(User).filter(User.google_sub == settings.bootstrap_user_sub).first()
     if not user:
         user = User(google_sub=settings.bootstrap_user_sub, email=settings.bootstrap_user_email)
@@ -116,17 +143,28 @@ def development_user(db: Session) -> User:
     return user
 
 
+def _api_token_matches(candidate: str) -> bool:
+    if len(settings.api_token) < MIN_API_TOKEN_LENGTH:
+        return False
+    return secrets.compare_digest(candidate, settings.api_token)
+
+
 async def current_mcp_user() -> User:
     """Resolve the current tool caller without accepting an owner ID from tool input."""
     from src.database.connection import SessionLocal
 
     with SessionLocal() as db:
         if settings.auth_mode == "development":
-            return development_user(db)
+            return local_owner_user(db)
 
         token = get_access_token()
         if token is None:
             raise PermissionError("Authentication required")
+
+        # The static verifier already rejected every token but the configured one.
+        if settings.auth_mode == "single_user":
+            return local_owner_user(db)
+
         claims = _claims_from_mapping(token.claims, token.subject)
         return resolve_user(db, claims)
 
@@ -151,7 +189,16 @@ async def get_current_user(
 ) -> User:
     """Authenticate account-management and HTTP mail APIs."""
     if settings.auth_mode == "development":
-        return development_user(db)
+        return local_owner_user(db)
+
+    if settings.auth_mode == "single_user":
+        if credentials and _api_token_matches(credentials.credentials):
+            return local_owner_user(db)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
     session_identity = request.session.get("identity") if hasattr(request, "session") else None
     if session_identity:

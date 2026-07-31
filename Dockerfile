@@ -1,12 +1,21 @@
 FROM python:3.11-alpine
 
+# OCR languages baked into the image. Tesseract cannot read a script it has no
+# data for, and with no language it assumes English and mangles every accented
+# word, so the default covers the Latin-script languages most mail is written
+# in. Override to add or trim, for example:
+#   docker build --build-arg TESSERACT_LANGS="eng deu chi_sim jpn" .
+# `apk search tesseract-ocr-data` lists all 67 available packs.
+ARG TESSERACT_LANGS="eng deu fra ita spa nld por"
+
 # System dependencies
 # - postgresql-dev: needed for psycopg2
-# - tesseract-ocr: optional OCR for image attachments
+# - tesseract-ocr: OCR for image attachments
 RUN apk add --no-cache \
     gcc musl-dev libffi-dev openssl-dev python3-dev curl \
     postgresql-dev \
-    tesseract-ocr tesseract-ocr-data-eng leptonica py3-pillow \
+    tesseract-ocr leptonica py3-pillow \
+    $(for lang in $TESSERACT_LANGS; do echo "tesseract-ocr-data-$lang"; done) \
     && rm -rf /var/cache/apk/*
 
 WORKDIR /app

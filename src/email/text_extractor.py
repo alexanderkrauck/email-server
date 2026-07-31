@@ -241,6 +241,44 @@ class TextExtractor:
             logger.warning("PPTX extraction failed: %s", e)
             return ""
 
+    _ocr_languages: str | None = None
+
+    @classmethod
+    def _resolve_ocr_languages(cls) -> str:
+        """Resolve the tesseract language string, defaulting to everything installed.
+
+        Passing no language makes tesseract assume English, which mangles every
+        accented script: German umlauts and sharp s come back as "diirfen
+        FuRboden", so the text is indexed but can never be found by searching
+        the words that are actually on the page.
+        """
+        if cls._ocr_languages is not None:
+            return cls._ocr_languages
+
+        from src.config import settings
+
+        configured = settings.ocr_languages.strip()
+        if configured:
+            cls._ocr_languages = configured
+            return cls._ocr_languages
+
+        try:
+            import pytesseract
+
+            available = [
+                language
+                for language in pytesseract.get_languages(config="")
+                # Orientation and script detection is not a recognition language.
+                if language != "osd"
+            ]
+        except Exception as exc:
+            logger.warning("Could not enumerate OCR languages, falling back to eng: %s", exc)
+            available = []
+
+        cls._ocr_languages = "+".join(sorted(available)) or "eng"
+        logger.info("OCR languages: %s", cls._ocr_languages)
+        return cls._ocr_languages
+
     def _extract_image_ocr(self, data: bytes, content_type: str) -> str:
         """Extract text from images using OCR."""
         try:
@@ -250,8 +288,7 @@ class TextExtractor:
             from PIL import Image
 
             image = Image.open(BytesIO(data))
-            text = pytesseract.image_to_string(image)
-            return text
+            return pytesseract.image_to_string(image, lang=self._resolve_ocr_languages())
         except Exception as e:
             logger.warning("OCR extraction failed: %s", e)
             return ""

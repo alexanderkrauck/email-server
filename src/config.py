@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     store_text_only: bool = False
     max_attachment_size_text: int = 10 * 1024 * 1024  # Max size for text extraction
 
+    # OCR. Empty uses every language installed in the image, which is the only
+    # way image attachments in mixed-language mailboxes get read correctly.
+    # Pin a subset such as "deu+eng" to trade coverage for speed.
+    ocr_languages: str = ""
+
     # Text Extraction Settings (which types to extract text from)
     extract_pdf_text: bool = True
     extract_docx_text: bool = True

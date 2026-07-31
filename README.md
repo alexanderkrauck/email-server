@@ -265,6 +265,18 @@ The parts that make search trustworthy rather than best-effort:
   database leases, so two workers cannot sync one mailbox and a crashed worker cannot
   hold a permanent lock.
 - PostgreSQL GIN indexes back lexical body and attachment search.
+- Attachment text is extracted at sync time. Image attachments are OCR'd in
+  every language installed in the image, because tesseract given no language
+  assumes English and mangles accented scripts: German umlauts come back as
+  `dirfen Fuboden` instead of `dürfen Fußboden`, so the text is indexed but can
+  never be found by searching the words on the page. The image ships
+  `eng deu fra ita spa nld por`; add or trim with
+  `docker build --build-arg TESSERACT_LANGS="eng deu jpn"`, and pin a subset at
+  runtime with `EMAILSERVER_OCR_LANGUAGES=deu+eng` to trade coverage for speed.
+- A `Date` header that parses but is implausible, such as a year of 2611, is
+  discarded rather than stored, because search sorts and paginates on that
+  column. Gmail falls back to the provider timestamp; IMAP leaves it null.
+  `scripts/repair_email_dates.py` clears values written before this check.
 - Regex search is separate and bounded by scope, pattern, result and statement time.
 - Sends support idempotency keys and append an owner-scoped audit record.
 

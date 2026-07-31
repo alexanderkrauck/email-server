@@ -30,7 +30,10 @@ class Settings(BaseSettings):
     email_check_interval: int = 30  # seconds
     max_emails_per_batch: int = 50
     deletion_reconcile_interval: int = 21_600
+    # The reconciler always tombstones; physical removal happens after the grace
+    # period, so a wrong deletion inference stays recoverable for a few days.
     upstream_delete_policy: Literal["hard_delete", "tombstone", "retain"] = "hard_delete"
+    tombstone_grace_days: int = 7
     gmail_page_size: int = 100
     gmail_backfill_pages_per_cycle: int = 5
     gmail_history_pages_per_cycle: int = 20

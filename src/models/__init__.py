@@ -3,6 +3,7 @@
 from .attachment import EmailAttachment
 from .email import EmailLog
 from .participant import MailParticipant
+from .placement import MessagePlacement
 from .send_audit import SendAudit
 from .smtp_config import SMTPConfig
 from .sync_cursor import MailSyncCursor
@@ -13,6 +14,7 @@ __all__ = [
     "EmailLog",
     "MailParticipant",
     "MailSyncCursor",
+    "MessagePlacement",
     "SMTPConfig",
     "SendAudit",
     "User",

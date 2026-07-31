@@ -56,6 +56,7 @@ class EmailLog(Base):
         back_populates="email_log",
         cascade="all, delete-orphan",
     )
+    placements = relationship("MessagePlacement", cascade="all, delete-orphan")
     mail_account = relationship("SMTPConfig", back_populates="emails")
 
     def __repr__(self):

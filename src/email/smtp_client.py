@@ -14,6 +14,7 @@ from typing import Dict, List, Optional
 import aioimaplib
 
 from src.email.message_dates import parse_header_date
+from src.email.message_identity import stable_identity
 from src.models.smtp_config import SMTPConfig
 
 logger = logging.getLogger(__name__)
@@ -611,7 +612,14 @@ class SMTPClient:
                 "recipient": recipient[:500],
                 "subject": subject,
                 "message_id": message_id,
-                "provider_message_id": f"{folder}:{uid_validity or 0}:{uid}",
+                "provider_message_id": stable_identity(
+                    uses_provider_ids=False,
+                    provider_message_id=None,
+                    message_id=message_id,
+                    folder=folder,
+                    uid=uid,
+                    uid_validity=uid_validity,
+                ),
                 "provider_thread_id": provider_thread_id[:768],
                 "folder": folder,
                 "imap_uid": int(uid) if uid.isdigit() else None,

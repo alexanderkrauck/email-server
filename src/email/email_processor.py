@@ -16,10 +16,123 @@ from src.email.smtp_client import SMTPClient
 from src.email.text_extractor import TextExtractor
 from src.models.email import EmailLog
 from src.models.participant import MailParticipant
+from src.models.placement import MessagePlacement
 from src.models.smtp_config import SMTPConfig
 from src.services.message_metadata import content_fingerprint, participant_models
 
 logger = logging.getLogger(__name__)
+
+
+def upsert_placement(db, email_log_id: int, folder: str | None, uid: int | None, uid_validity: int | None) -> None:
+    """Record that a message is filed in a folder, replacing any earlier UID."""
+    if not folder:
+        return
+    placement = (
+        db.query(MessagePlacement)
+        .filter(MessagePlacement.email_log_id == email_log_id, MessagePlacement.folder == folder)
+        .first()
+    )
+    if placement:
+        placement.uid = uid
+        placement.uid_validity = uid_validity
+        placement.seen_at = datetime.now(tz=timezone.utc)
+        return
+    db.add(MessagePlacement(email_log_id=email_log_id, folder=folder, uid=uid, uid_validity=uid_validity))
+
+
+def apply_folder_snapshots(db, *, config_id: int, snapshots: dict) -> None:
+    """Mirror one full pass over every folder into placements.
+
+    Deliberately does not try to recognise a moved message here. The ordinary sync
+    pass discovers it in its new folder and upserts by identity, which is far cheaper
+    than fetching a Message-ID header for every UID in the mailbox. This function only
+    retires placements and tombstones messages that lost every placement they had.
+    """
+    now = datetime.now(tz=timezone.utc)
+
+    # Load the account's placements once. A query per UID would be tens of thousands
+    # of round trips per cycle on a large mailbox.
+    existing = (
+        db.query(MessagePlacement)
+        .join(EmailLog, EmailLog.id == MessagePlacement.email_log_id)
+        .filter(EmailLog.smtp_config_id == config_id)
+        .all()
+    )
+    by_folder: dict[str, list] = {}
+    for placement in existing:
+        by_folder.setdefault(placement.folder, []).append(placement)
+
+    # Only a message that demonstrably had a placement can be judged missing. Rows
+    # that predate the folder column have none and must never be touched.
+    candidates = {placement.email_log_id for placement in existing}
+
+    for folder, state in snapshots.items():
+        available = state["uids"]
+        flags = state["flags"]
+        validity = state["uid_validity"]
+        for placement in by_folder.get(folder, []):
+            # A UIDVALIDITY change renumbers every UID; that is not a deletion.
+            if placement.uid_validity is not None and placement.uid_validity != validity:
+                continue
+            if placement.uid in available:
+                if placement.uid in flags:
+                    message = db.get(EmailLog, placement.email_log_id)
+                    if message is not None:
+                        message.flags = flags[placement.uid]
+                continue
+            db.delete(placement)
+
+    db.flush()
+
+    if not candidates:
+        return
+    survivors = {
+        row[0]
+        for row in db.query(MessagePlacement.email_log_id)
+        .filter(MessagePlacement.email_log_id.in_(candidates))
+        .all()
+    }
+    for message_id in candidates - survivors:
+        message = db.get(EmailLog, message_id)
+        if message is None:
+            continue
+        # Always tombstone, whatever upstream_delete_policy says. A message is briefly
+        # unplaced while a move is in flight, and reap_tombstoned_messages performs the
+        # physical removal once the account is healthy and the grace period has passed.
+        message.deleted_at = now
+
+
+def reap_tombstoned_messages(db, *, config_id: int, now: datetime | None = None) -> int:
+    """Physically remove messages tombstoned for longer than the grace period.
+
+    Only from a healthy, fully backfilled account: a partial view of a mailbox is
+    what produces a wrong deletion inference in the first place.
+    """
+    from src.config import settings
+
+    if settings.upstream_delete_policy == "retain":
+        return 0
+
+    account = db.query(SMTPConfig).filter(SMTPConfig.id == config_id).first()
+    if account is None or not account.backfill_complete or account.sync_state != "healthy":
+        return 0
+
+    cutoff = (now or datetime.now(tz=timezone.utc)) - timedelta(days=settings.tombstone_grace_days)
+    doomed = (
+        db.query(EmailLog)
+        .filter(
+            EmailLog.smtp_config_id == config_id,
+            EmailLog.deleted_at.is_not(None),
+            EmailLog.deleted_at < cutoff,
+        )
+        .all()
+    )
+    for message in doomed:
+        db.delete(message)
+    if doomed:
+        logger.info("Reaped %d tombstoned message(s) from account %s", len(doomed), config_id)
+    return len(doomed)
+
 
 
 class EmailProcessor:
@@ -637,7 +750,6 @@ class EmailProcessor:
                         existing_email.provider_thread_id = sanitize_db_text(
                             email_data.get("provider_thread_id")
                         )
-                        existing_email.folder = sanitize_db_text(email_data.get("folder"))
                         existing_email.flags = sanitize_db_text(email_data.get("flags"))
                         existing_email.provider_size = (
                             email_data.get("provider_size")
@@ -663,6 +775,13 @@ class EmailProcessor:
                             db.add_all(
                                 participant_models(existing_email.id, email_data)
                             )
+                        upsert_placement(
+                            db,
+                            existing_email.id,
+                            email_data.get("folder"),
+                            email_data.get("imap_uid"),
+                            email_data.get("uid_validity"),
+                        )
                         logger.debug("Email already exists: %s", email_data["message_id"])
                         continue
 
@@ -700,6 +819,13 @@ class EmailProcessor:
                             db.add_all(
                                 participant_models(legacy_email.id, email_data)
                             )
+                        upsert_placement(
+                            db,
+                            legacy_email.id,
+                            email_data.get("folder"),
+                            email_data.get("imap_uid"),
+                            email_data.get("uid_validity"),
+                        )
                         logger.debug("Upgraded legacy provider reference for %s", email_data["message_id"])
                         continue
 
@@ -745,6 +871,13 @@ class EmailProcessor:
 
                     db.add(email_log)
                     db.flush()
+                    upsert_placement(
+                        db,
+                        email_log.id,
+                        email_data.get("folder"),
+                        email_data.get("imap_uid"),
+                        email_data.get("uid_validity"),
+                    )
                     db.add_all(participant_models(email_log.id, email_data))
 
                     if email_data["attachment_count"] > 0 and "raw_email" in email_data:
@@ -873,29 +1006,8 @@ class EmailProcessor:
             return
         snapshots = await client.fetch_folder_state()
         with get_db_session() as db:
-            for folder, state in snapshots.items():
-                messages = (
-                    db.query(EmailLog)
-                    .filter(
-                        EmailLog.smtp_config_id == config_id,
-                        EmailLog.folder == folder,
-                        EmailLog.uid_validity == state["uid_validity"],
-                        EmailLog.imap_uid.is_not(None),
-                    )
-                    .all()
-                )
-                available = state["uids"]
-                flags = state["flags"]
-                for message in messages:
-                    if message.imap_uid not in available:
-                        if settings.upstream_delete_policy == "hard_delete":
-                            db.delete(message)
-                        elif settings.upstream_delete_policy == "tombstone":
-                            message.deleted_at = now
-                        continue
-                    message.deleted_at = None
-                    if message.imap_uid in flags:
-                        message.flags = flags[message.imap_uid]
+            apply_folder_snapshots(db, config_id=config_id, snapshots=snapshots)
+            reap_tombstoned_messages(db, config_id=config_id, now=now)
             account = db.query(SMTPConfig).filter(SMTPConfig.id == config_id).one()
             account.last_reconciled_at = now
 

@@ -74,13 +74,77 @@ jobs:
       - run: pip install -r requirements.txt
       - run: mkdir -p "$EMAILSERVER_DATA_DIR"
 
+      # Stop before the backfill so rows can be seeded into the pre-migration
+      # shape; an empty database would short-circuit it and prove nothing.
+      - name: Apply migrations up to the placements table
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          from alembic import command
+          from alembic.config import Config
+
+          from src.config import settings
+
+          config = Config("alembic.ini")
+          config.set_main_option("script_location", str(Path("alembic").resolve()))
+          config.set_main_option("sqlalchemy.url", settings.database_url.replace("%", "%%"))
+          command.upgrade(config, "20260731_09")
+          PY
+
+      # Seed the exact shape the backfill exists for: one message filed in two
+      # folders, which the old identity scheme stored as two unrelated rows.
+      - name: Seed rows so the backfill path is exercised
+        run: |
+          python - <<'PY'
+          from src.database.connection import SessionLocal
+          from src.models.email import EmailLog
+          from src.models.smtp_config import SMTPConfig
+          from src.models.user import User
+
+          with SessionLocal() as db:
+              db.add(User(google_sub="ci", email="ci@example.invalid"))
+              db.flush()
+              account = SMTPConfig(
+                  owner_user_id=1, provider="imap", auth_type="password", name="ci",
+                  account_name="ci@example.invalid", host="imap.example.invalid", port=993,
+                  smtp_host="smtp.example.invalid", smtp_port=465, username="ci",
+              )
+              db.add(account)
+              db.flush()
+              for folder, uid in (("INBOX", 1), ("INBOX.Sent", 2)):
+                  db.add(EmailLog(
+                      smtp_config_id=account.id, sender="a@example.invalid",
+                      recipient="b@example.invalid", subject="ci",
+                      message_id="<ci@example.invalid>",
+                      provider_message_id=f"{folder}:1:{uid}",
+                      folder=folder, imap_uid=uid, uid_validity=1,
+                  ))
+              db.commit()
+          PY
+
       # Exercise the same entry point the server uses on startup, so a broken
       # revision fails here rather than on a production deployment.
-      - name: Apply migrations
+      - name: Apply the backfill
         run: python -c "from src.database.connection import init_database; init_database()"
 
       - name: Re-apply migrations (must be idempotent)
         run: python -c "from src.database.connection import init_database; init_database()"
+
+      - name: The two rows must have merged into one message in two folders
+        run: |
+          python - <<'PY'
+          from src.database.connection import SessionLocal
+          from src.models.email import EmailLog
+          from src.models.placement import MessagePlacement
+
+          with SessionLocal() as db:
+              messages = db.query(EmailLog).count()
+              placements = db.query(MessagePlacement).count()
+              assert messages == 1, f"merge did not collapse the duplicate: {messages} rows"
+              assert placements == 2, f"both placements should survive: {placements}"
+          print("backfill verified")
+          PY
 
   docker:
     name: docker build

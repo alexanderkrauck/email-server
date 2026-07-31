@@ -11,6 +11,7 @@ from src.email.gmail_api_client import GmailApiClient
 from src.email.smtp_client import SMTPClient
 from src.models.attachment import EmailAttachment
 from src.models.email import EmailLog
+from src.models.placement import MessagePlacement
 from src.models.smtp_config import SMTPConfig
 
 
@@ -25,6 +26,26 @@ def owned_attachment(db: Session, user_id: int, attachment_id: int) -> EmailAtta
     if not attachment:
         raise HTTPException(status_code=404, detail="Attachment not found")
     return attachment
+
+
+
+def current_placement(db, email_log_id: int):
+    """Return a folder the message is filed in, preferring one that is not Trash."""
+    from src.config import settings
+    from src.services.mail_service import is_excluded_folder
+
+    placements = (
+        db.query(MessagePlacement)
+        .filter(MessagePlacement.email_log_id == email_log_id)
+        .order_by(MessagePlacement.seen_at.desc(), MessagePlacement.id.desc())
+        .all()
+    )
+    if not placements:
+        return None
+    for placement in placements:
+        if not is_excluded_folder(placement.folder, settings.excluded_folder_suffixes):
+            return placement
+    return placements[0]
 
 
 async def refetch_attachment_bytes(
@@ -44,10 +65,14 @@ async def refetch_attachment_bytes(
     else:
         client = SMTPClient(account)
         try:
-            if message.folder and message.imap_uid is not None:
-                raw_email = await client.fetch_raw_email(
-                    message.folder, message.imap_uid, message.uid_validity
-                )
+            # The message may have moved since it was indexed, so prefer a
+            # recorded placement over the denormalised columns.
+            placement = current_placement(db, message.id)
+            folder = placement.folder if placement else message.folder
+            uid = placement.uid if placement else message.imap_uid
+            uid_validity = placement.uid_validity if placement else message.uid_validity
+            if folder and uid is not None:
+                raw_email = await client.fetch_raw_email(folder, uid, uid_validity)
             else:
                 raw_email = await client.fetch_raw_by_message_id(message.message_id)
         finally:

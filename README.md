@@ -251,8 +251,11 @@ POST   /api/v1/send
 The parts that make search trustworthy rather than best-effort:
 
 - Alembic applies versioned, data-preserving migrations on startup.
-- Message identity is unique per `(mail_account_id, provider_message_id)`. The RFC
-  `Message-ID` stays metadata, because providers reuse and rewrite it.
+- Message identity is the normalised RFC `Message-ID`, which travels with the
+  message. Location lives separately in `message_placements`, one row per folder,
+  so moving a message upstream relocates it instead of deleting and re-creating
+  it. Gmail API messages keep the provider's own id, which already survives a
+  label change.
 - IMAP cursors persist UID, UIDVALIDITY and folder. Backfills run oldest-first and are
   bounded per cycle. A cursor advances only after its batch commits, and a UIDVALIDITY
   change resets just that folder.

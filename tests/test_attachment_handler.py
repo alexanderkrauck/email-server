@@ -219,3 +219,64 @@ def test_attachment_filename_removes_header_control_characters():
     from src.email import sanitize_filename
 
     assert sanitize_filename("report\r\n folded.pdf") == "report_folded.pdf"
+
+
+def test_refetch_prefers_a_live_folder_over_trash():
+    """A moved message must stay refetchable; the old UID is gone upstream."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from src.models.base import Base
+    from src.models.email import EmailLog
+    from src.models.placement import MessagePlacement
+    from src.services.attachment_service import current_placement
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    message = EmailLog(
+        smtp_config_id=1,
+        sender="a@example.com",
+        recipient="b@example.com",
+        provider_message_id="<abc@example.com>",
+        message_id="<abc@example.com>",
+    )
+    db.add(message)
+    db.commit()
+    db.add_all(
+        [
+            MessagePlacement(email_log_id=message.id, folder="INBOX.Trash", uid=3, uid_validity=1),
+            MessagePlacement(email_log_id=message.id, folder="INBOX.Archive", uid=12, uid_validity=1),
+        ]
+    )
+    db.commit()
+
+    placement = current_placement(db, message.id)
+
+    assert (placement.folder, placement.uid) == ("INBOX.Archive", 12)
+    db.close()
+
+
+def test_refetch_has_no_placement_to_use_for_legacy_rows():
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from src.models.base import Base
+    from src.models.email import EmailLog
+    from src.services.attachment_service import current_placement
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    message = EmailLog(
+        smtp_config_id=1,
+        sender="a@example.com",
+        recipient="b@example.com",
+        provider_message_id="<abc@example.com>",
+        message_id="<abc@example.com>",
+    )
+    db.add(message)
+    db.commit()
+
+    assert current_placement(db, message.id) is None
+    db.close()

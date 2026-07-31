@@ -18,6 +18,7 @@ from src.handlers.email_handler_types import SendMailInput
 from src.models.attachment import EmailAttachment
 from src.models.email import EmailLog
 from src.models.participant import MailParticipant
+from src.models.placement import MessagePlacement
 from src.models.send_audit import SendAudit
 from src.models.smtp_config import SMTPConfig
 from src.models.user import User
@@ -252,6 +253,51 @@ def serialize_email(
             or (selected_format in {"html", "both"} and len(html) > body_limit)
         )
     return result
+
+
+def is_excluded_folder(folder: str | None, suffixes: list[str]) -> bool:
+    """Match Trash and Junk by suffix: real folders are INBOX.Trash, [Google Mail]/Trash."""
+    if not folder:
+        return False
+    lowered = folder.lower()
+    return any(
+        lowered == suffix or lowered.endswith(f".{suffix}") or lowered.endswith(f"/{suffix}")
+        for suffix in suffixes
+    )
+
+
+def _apply_folder_scope(db, query, folders: list[str] | None, exclude_folders: list[str] | None):
+    """Scope a query by folder, via placements.
+
+    The exclusion is "has a placement outside the excluded set", not "has no
+    placement inside it": a message can sit in both INBOX and Trash, and the
+    stricter reading would hide thousands of live messages. A message with no
+    placement at all is kept, because absence of a placement is not evidence of
+    being in Trash.
+    """
+    if folders:
+        return query.filter(
+            EmailLog.id.in_(
+                select(MessagePlacement.email_log_id).where(MessagePlacement.folder.in_(folders))
+            )
+        )
+
+    suffixes = settings.excluded_folder_suffixes if exclude_folders is None else exclude_folders
+    if not suffixes:
+        return query
+    excluded_names = [
+        row[0]
+        for row in db.query(MessagePlacement.folder).distinct().all()
+        if is_excluded_folder(row[0], suffixes)
+    ]
+    if not excluded_names:
+        return query
+    return query.filter(
+        ~EmailLog.id.in_(select(MessagePlacement.email_log_id))
+        | EmailLog.id.in_(
+            select(MessagePlacement.email_log_id).where(MessagePlacement.folder.notin_(excluded_names))
+        )
+    )
 
 
 def _apply_common_filters(
@@ -560,6 +606,8 @@ def search_mail(
     participants: list[str] | None = None,
     has_attachments: bool = False,
     search_attachments: bool = False,
+    folders: list[str] | None = None,
+    exclude_folders: list[str] | None = None,
     limit: int = 50,
     cursor: str | None = None,
     deduplicate: str = "exact",
@@ -582,6 +630,7 @@ def search_mail(
         participant=None,
         has_attachments=has_attachments,
     )
+    q = _apply_folder_scope(db, q, folders, exclude_folders)
     participant_condition = _participant_filter(participant_terms)
     if participant_condition is not None:
         participant_ids = (
@@ -666,6 +715,8 @@ def search_mail(
         "participants": sorted(participant_terms),
         "has_attachments": has_attachments,
         "search_attachments": search_attachments,
+        "folders": sorted(folders) if folders else None,
+        "exclude_folders": sorted(exclude_folders) if exclude_folders is not None else None,
         "deduplicate": deduplicate,
     }
     query_hash = _query_digest(query_values)
@@ -811,6 +862,8 @@ def search_mail_regex(
     account_id: int | None = None,
     date_from: datetime | None = None,
     date_to: datetime | None = None,
+    folders: list[str] | None = None,
+    exclude_folders: list[str] | None = None,
     limit: int = 25,
     cursor: str | None = None,
     deduplicate: str = "exact",
@@ -845,6 +898,7 @@ def search_mail_regex(
         participant=None,
         has_attachments=False,
     )
+    q = _apply_folder_scope(db, q, folders, exclude_folders)
     columns = {
         "sender": EmailLog.sender,
         "recipient": EmailLog.recipient,
@@ -873,6 +927,8 @@ def search_mail_regex(
         "account_id": account_id,
         "date_from": date_from.isoformat() if date_from else None,
         "date_to": date_to.isoformat() if date_to else None,
+        "folders": sorted(folders) if folders else None,
+        "exclude_folders": sorted(exclude_folders) if exclude_folders is not None else None,
         "deduplicate": deduplicate,
     }
     query_hash = _query_digest(query_values)

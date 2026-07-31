@@ -266,7 +266,9 @@ def register_mcp_tools(mcp) -> None:
         name="search_mail",
         description=(
             "Exhaustively search owned mail with exact counts, stable cursor pagination, "
-            "participant/domain facets, match provenance, deduplication, and sync coverage."
+            "participant/domain facets, match provenance, deduplication, and sync coverage. "
+            "Trash, Spam and Junk folders are excluded unless named in folders, or "
+            "exclude_folders is set to an empty list."
         ),
         annotations=READ_ONLY,
     )
@@ -280,6 +282,8 @@ def register_mcp_tools(mcp) -> None:
         participants: list[str] | None = None,
         has_attachments: bool = False,
         search_attachments: bool = False,
+        folders: list[str] | None = None,
+        exclude_folders: list[str] | None = None,
         limit: int = 50,
         cursor: str | None = None,
         deduplicate: Literal["none", "exact", "mirror"] = "exact",
@@ -297,6 +301,8 @@ def register_mcp_tools(mcp) -> None:
                 participants=participants,
                 has_attachments=has_attachments,
                 search_attachments=search_attachments,
+                folders=folders,
+                exclude_folders=exclude_folders,
                 limit=limit,
                 cursor=cursor,
                 deduplicate=deduplicate,
@@ -322,6 +328,8 @@ def register_mcp_tools(mcp) -> None:
         account_id: int | None = None,
         date_from: str | None = None,
         date_to: str | None = None,
+        folders: list[str] | None = None,
+        exclude_folders: list[str] | None = None,
         limit: int = 25,
         cursor: str | None = None,
         deduplicate: Literal["none", "exact", "mirror"] = "exact",
@@ -337,6 +345,8 @@ def register_mcp_tools(mcp) -> None:
                 account_id=account_id,
                 date_from=_date(date_from),
                 date_to=_date(date_to),
+                folders=folders,
+                exclude_folders=exclude_folders,
                 limit=limit,
                 cursor=cursor,
                 deduplicate=deduplicate,

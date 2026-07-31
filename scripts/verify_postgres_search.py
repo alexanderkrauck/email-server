@@ -40,7 +40,8 @@ def main() -> None:
         assert user is not None, "No testable user exists"
         inventory = mail_account_summary(db, user)
 
-        first = search_mail(db, user, limit=37, deduplicate="none")
+        # Trash is excluded by default; compare against the unfiltered inventory.
+        first = search_mail(db, user, limit=37, deduplicate="none", exclude_folders=[])
         assert first["raw_count"] == inventory["total_message_count"]
         assert first["total_count"] == first["raw_count"]
         assert first["next_cursor"] and first["has_more"]
@@ -50,6 +51,7 @@ def main() -> None:
             limit=37,
             cursor=first["next_cursor"],
             deduplicate="none",
+            exclude_folders=[],
         )
         assert not {
             item["id"] for item in first["items"]

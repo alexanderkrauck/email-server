@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     # period, so a wrong deletion inference stays recoverable for a few days.
     upstream_delete_policy: Literal["hard_delete", "tombstone", "retain"] = "hard_delete"
     tombstone_grace_days: int = 7
+    # Matched as suffixes: real folders are "INBOX.Trash", "INBOX.SPAM",
+    # "[Google Mail]/Trash". Exact names match almost nothing.
+    excluded_folder_suffixes: list[str] = ["trash", "spam", "junk", "deleted items", "papierkorb"]
     gmail_page_size: int = 100
     gmail_backfill_pages_per_cycle: int = 5
     gmail_history_pages_per_cycle: int = 20

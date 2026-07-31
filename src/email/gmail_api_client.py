@@ -4,10 +4,10 @@ import asyncio
 import base64
 import json
 from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
 
 import httpx
 
+from src.email.message_dates import parse_header_date
 from src.email.smtp_client import SMTPClient
 from src.security.provider_tokens import refresh_access_token
 
@@ -155,8 +155,5 @@ class GmailApiClient:
             return datetime.fromtimestamp(int(internal_date) / 1000, tz=timezone.utc)
         for header in provider_message.get("payload", {}).get("headers", []):
             if header.get("name", "").lower() == "date":
-                try:
-                    return parsedate_to_datetime(header.get("value", ""))
-                except (TypeError, ValueError):
-                    return None
+                return parse_header_date(header.get("value", ""))
         return None

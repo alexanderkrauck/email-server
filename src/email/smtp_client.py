@@ -8,11 +8,12 @@ import re
 import ssl
 from datetime import datetime, timezone
 from email import message_from_bytes, policy
-from email.utils import getaddresses, parsedate_to_datetime
+from email.utils import getaddresses
 from typing import Dict, List, Optional
 
 import aioimaplib
 
+from src.email.message_dates import parse_header_date
 from src.models.smtp_config import SMTPConfig
 
 logger = logging.getLogger(__name__)
@@ -559,13 +560,11 @@ class SMTPClient:
             reference_ids = re.findall(r"<[^>]+>", references)
             provider_thread_id = reference_ids[0] if reference_ids else (in_reply_to or message_id)
 
-            # Parse date
-            email_date = None
-            if date_str:
-                try:
-                    email_date = parsedate_to_datetime(date_str)
-                except Exception:
-                    email_date = datetime.now(tz=timezone.utc)
+            # An unparseable or implausible Date header leaves this null rather
+            # than poisoning the column search sorts and paginates on.
+            email_date = parse_header_date(date_str)
+            if date_str and email_date is None:
+                logger.debug("Discarded implausible Date header on uid %s: %r", uid, date_str[:120])
 
             # Extract body content
             body_plain = ""

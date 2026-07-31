@@ -35,6 +35,11 @@ services:
       - EMAILSERVER_API_HOST=0.0.0.0
       - EMAILSERVER_API_PORT=8000
       - EMAILSERVER_LOG_LEVEL=INFO
+      # The reconciler tombstones; a message leaves search at once and is removed
+      # physically after the grace period. hard_delete would let a single wrong
+      # inference destroy mail irreversibly.
+      - EMAILSERVER_UPSTREAM_DELETE_POLICY=${EMAILSERVER_UPSTREAM_DELETE_POLICY:-tombstone}
+      - EMAILSERVER_TOMBSTONE_GRACE_DAYS=${EMAILSERVER_TOMBSTONE_GRACE_DAYS:-7}
       - EMAILSERVER_AUTH_MODE=${EMAILSERVER_AUTH_MODE:-development}
       - EMAILSERVER_API_TOKEN=${EMAILSERVER_API_TOKEN:-}
       - EMAILSERVER_PUBLIC_BASE_URL=${EMAILSERVER_PUBLIC_BASE_URL:-http://localhost:8002}

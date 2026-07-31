@@ -22,6 +22,10 @@ services:
     environment:
       EMAILSERVER_DATABASE_URL: postgresql://emailserver:${POSTGRES_PASSWORD}@postgres:5432/emailserver
       EMAILSERVER_AUTH_MODE: google
+      # The reconciler tombstones; physical removal follows after the grace period,
+      # so a wrong deletion inference stays recoverable.
+      EMAILSERVER_UPSTREAM_DELETE_POLICY: ${EMAILSERVER_UPSTREAM_DELETE_POLICY:-tombstone}
+      EMAILSERVER_TOMBSTONE_GRACE_DAYS: ${EMAILSERVER_TOMBSTONE_GRACE_DAYS:-7}
       EMAILSERVER_PUBLIC_BASE_URL: https://${EMAILSERVER_DOMAIN}
       EMAILSERVER_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:?Set GOOGLE_CLIENT_ID}
       EMAILSERVER_GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:?Set GOOGLE_CLIENT_SECRET}

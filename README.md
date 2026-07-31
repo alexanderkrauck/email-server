@@ -14,9 +14,10 @@ from attachments, indexes all of it, and answers questions over that index with
 mailbox it has seen**. It runs as an authenticated HTTP endpoint, so you paste a URL
 into your AI client instead of installing anything on your laptop.
 
-<!-- TODO: replace with a 30-second capture of a real multi-year search. -->
-<!-- Suggested: ask "what did I agree to about pricing in 2023?" and show the -->
-<!-- model paging through search_mail to an exhaustive answer. -->
+![Claude answering a question about a mailbox through this server](docs/demo.gif)
+
+<sub>A real question against a live index of about 59,000 messages across six
+accounts. One string is blurred: a case number belonging to a real filing.</sub>
 
 ## Why this instead of the other email MCP servers
 

@@ -23,6 +23,7 @@ from src.models.send_audit import SendAudit
 from src.models.smtp_config import SMTPConfig
 from src.models.user import User
 from src.security.search_cursors import issue_search_cursor, verify_search_cursor
+from src.services.search_text import attachment_document, match_condition, message_document
 
 
 class MailAccountDetails(TypedDict):
@@ -71,6 +72,7 @@ class SearchPage(TypedDict):
     returned_count: int
     has_more: bool
     next_cursor: str | None
+    match: str
     matched_fields: list[str]
     account_coverage: list[dict[str, Any]]
     warnings: list[dict[str, str]]
@@ -223,6 +225,11 @@ def serialize_email(
         "email_date": message.email_date.isoformat() if message.email_date else None,
         "provider_size": message.provider_size,
         "content_state": message.content_state,
+        # Tri-state: null means the provider never reported flags for this
+        # message, which is not the same as it having been read.
+        "is_unread": message.is_unread,
+        "is_flagged": message.is_flagged,
+        "is_answered": message.is_answered,
         "attachment_count": message.attachment_count,
         "attachments": [
             serialize_attachment(item, include_text=include_attachment_text) for item in message.attachments
@@ -298,6 +305,49 @@ def _apply_folder_scope(db, query, folders: list[str] | None, exclude_folders: l
             select(MessagePlacement.email_log_id).where(MessagePlacement.folder.notin_(excluded_names))
         )
     )
+
+
+FLAG_COLUMNS = {
+    "is_unread": EmailLog.is_unread,
+    "is_flagged": EmailLog.is_flagged,
+    "is_answered": EmailLog.is_answered,
+}
+
+
+def _apply_flag_filters(query, requested: dict[str, bool | None]):
+    """Filter on read state, using SQL two-valued logic on purpose.
+
+    ``is_unread=False`` must not match a message whose flags were never fetched.
+    A NULL fails both ``= true`` and ``= false``, which is the honest answer;
+    _flag_state_warning then reports how many messages that silently removed.
+    """
+    for name, value in requested.items():
+        if value is not None:
+            query = query.filter(FLAG_COLUMNS[name].is_(value))
+    return query
+
+
+def _flag_state_warning(scope_query, requested: dict[str, bool | None]) -> dict[str, str] | None:
+    """Report messages excluded from a flag filter only because nothing is known."""
+    columns = [FLAG_COLUMNS[name] for name, value in requested.items() if value is not None]
+    if not columns:
+        return None
+    unknown = (
+        scope_query.filter(or_(*[column.is_(None) for column in columns]))
+        .order_by(None)
+        .count()
+    )
+    if not unknown:
+        return None
+    return {
+        "code": "FLAG_STATE_UNKNOWN",
+        "message": (
+            f"{unknown} message(s) matching the other filters were excluded because "
+            "their read state was never reported by the provider. Messages stored "
+            "before flag tracking existed, and messages in accounts that have not "
+            "reconciled since, have no flag state to filter on."
+        ),
+    }
 
 
 def _apply_common_filters(
@@ -497,6 +547,7 @@ def _lexical_matches(
     *,
     search_attachments: bool,
     participant_terms: list[str],
+    match: str = "stemmed",
 ) -> tuple[dict[int, list[dict[str, Any]]], set[str]]:
     matches: dict[int, list[dict[str, Any]]] = {
         message_id: [] for message_id in message_ids
@@ -506,55 +557,48 @@ def _lexical_matches(
         return matches, fields
 
     if query_text.strip():
-        parsed = func.websearch_to_tsquery("simple", query_text)
-        documents = {
-            "sender": func.to_tsvector("simple", func.coalesce(EmailLog.sender, "")),
-            "recipient": func.to_tsvector(
-                "simple",
-                func.coalesce(EmailLog.recipient, ""),
-            ),
-            "subject": func.to_tsvector(
-                "simple",
-                func.coalesce(EmailLog.subject, ""),
-            ),
-            "body": func.to_tsvector(
-                "simple",
-                func.coalesce(EmailLog.body_plain, ""),
-            ),
+        columns = {
+            "sender": func.coalesce(EmailLog.sender, ""),
+            "recipient": func.coalesce(EmailLog.recipient, ""),
+            "subject": func.coalesce(EmailLog.subject, ""),
+            "body": func.coalesce(EmailLog.body_plain, ""),
         }
         rows = (
             db.query(
                 EmailLog.id,
-                *(document.op("@@")(parsed).label(name) for name, document in documents.items()),
+                *(
+                    match_condition(column, query_text, match=match).label(name)
+                    for name, column in columns.items()
+                ),
             )
             .filter(EmailLog.id.in_(message_ids))
             .all()
         )
         for row in rows:
-            for name in documents:
+            for name in columns:
                 if getattr(row, name):
                     matches[row.id].append({"field": name})
                     fields.add(name)
 
         if search_attachments:
+            attachment_text = attachment_document()
             attachment_rows = (
                 db.query(
                     EmailAttachment.email_log_id,
                     EmailAttachment.id,
                     EmailAttachment.filename,
+                    # Highlighting is verbatim whatever the match mode: a stem is
+                    # not a substring the reader would recognise in the page.
                     func.ts_headline(
                         "simple",
-                        func.coalesce(EmailAttachment.text_content, ""),
-                        parsed,
+                        attachment_text,
+                        func.websearch_to_tsquery("simple", query_text),
                         "MaxWords=24, MinWords=8, ShortWord=2",
                     ).label("snippet"),
                 )
                 .filter(
                     EmailAttachment.email_log_id.in_(message_ids),
-                    func.to_tsvector(
-                        "simple",
-                        func.coalesce(EmailAttachment.text_content, ""),
-                    ).op("@@")(parsed),
+                    match_condition(attachment_text, query_text, match=match),
                 )
                 .all()
             )
@@ -608,12 +652,18 @@ def search_mail(
     search_attachments: bool = False,
     folders: list[str] | None = None,
     exclude_folders: list[str] | None = None,
+    is_unread: bool | None = None,
+    is_flagged: bool | None = None,
+    is_answered: bool | None = None,
+    match: str = "stemmed",
     limit: int = 50,
     cursor: str | None = None,
     deduplicate: str = "exact",
 ) -> SearchPage:
     if deduplicate not in {"none", "exact", "mirror"}:
         raise HTTPException(status_code=400, detail="Invalid deduplication mode")
+    if match not in {"stemmed", "exact"}:
+        raise HTTPException(status_code=400, detail="Invalid match mode")
     if account_id is not None:
         owned_account(db, user.id, account_id)
     participant_terms = [
@@ -640,31 +690,24 @@ def search_mail(
             .subquery()
         )
         q = q.filter(EmailLog.id.in_(select(participant_ids)))
-    parsed_query = None
     if query.strip():
-        parsed_query = func.websearch_to_tsquery("simple", query)
-        document = func.to_tsvector(
-            "simple",
-            func.coalesce(EmailLog.sender, "")
-            + " "
-            + func.coalesce(EmailLog.recipient, "")
-            + " "
-            + func.coalesce(EmailLog.subject, "")
-            + " "
-            + func.coalesce(EmailLog.body_plain, ""),
-        )
-        condition = document.op("@@")(parsed_query)
+        condition = match_condition(message_document(), query, match=match)
         if search_attachments:
-            attachment_document = func.to_tsvector(
-                "simple", func.coalesce(EmailAttachment.text_content, "")
-            )
             attachment_ids = (
                 db.query(EmailAttachment.email_log_id)
-                .filter(attachment_document.op("@@")(parsed_query))
+                .filter(match_condition(attachment_document(), query, match=match))
                 .subquery()
             )
             condition = or_(condition, EmailLog.id.in_(select(attachment_ids)))
         q = q.filter(condition)
+
+    flag_filters = {
+        "is_unread": is_unread,
+        "is_flagged": is_flagged,
+        "is_answered": is_answered,
+    }
+    flag_warning = _flag_state_warning(q, flag_filters)
+    q = _apply_flag_filters(q, flag_filters)
 
     raw_count = q.order_by(None).count()
     key_expression = _dedupe_key(deduplicate)
@@ -717,6 +760,10 @@ def search_mail(
         "search_attachments": search_attachments,
         "folders": sorted(folders) if folders else None,
         "exclude_folders": sorted(exclude_folders) if exclude_folders is not None else None,
+        "is_unread": is_unread,
+        "is_flagged": is_flagged,
+        "is_answered": is_answered,
+        "match": match,
         "deduplicate": deduplicate,
     }
     query_hash = _query_digest(query_values)
@@ -749,6 +796,7 @@ def search_mail(
         query,
         search_attachments=search_attachments,
         participant_terms=participant_terms,
+        match=match,
     )
 
     logical_keys = {}
@@ -830,6 +878,8 @@ def search_mail(
         .all()
     )
     coverage, warnings = _account_coverage(db, user, account_id)
+    if flag_warning:
+        warnings.append(flag_warning)
     return {
         "items": items,
         "total_count": int(total_count),
@@ -837,6 +887,7 @@ def search_mail(
         "returned_count": len(items),
         "has_more": has_more,
         "next_cursor": next_cursor,
+        "match": match,
         "matched_fields": sorted(matched_fields),
         "account_coverage": coverage,
         "warnings": warnings,
@@ -864,6 +915,9 @@ def search_mail_regex(
     date_to: datetime | None = None,
     folders: list[str] | None = None,
     exclude_folders: list[str] | None = None,
+    is_unread: bool | None = None,
+    is_flagged: bool | None = None,
+    is_answered: bool | None = None,
     limit: int = 25,
     cursor: str | None = None,
     deduplicate: str = "exact",
@@ -921,6 +975,14 @@ def search_mail_regex(
         conditions.append(EmailLog.id.in_(select(matching_attachment_ids)))
     q = q.filter(or_(*conditions))
 
+    flag_filters = {
+        "is_unread": is_unread,
+        "is_flagged": is_flagged,
+        "is_answered": is_answered,
+    }
+    scope_before_flags = q
+    q = _apply_flag_filters(q, flag_filters)
+
     query_values = {
         "pattern": pattern,
         "fields": sorted(selected_fields),
@@ -929,10 +991,15 @@ def search_mail_regex(
         "date_to": date_to.isoformat() if date_to else None,
         "folders": sorted(folders) if folders else None,
         "exclude_folders": sorted(exclude_folders) if exclude_folders is not None else None,
+        "is_unread": is_unread,
+        "is_flagged": is_flagged,
+        "is_answered": is_answered,
         "deduplicate": deduplicate,
     }
     query_hash = _query_digest(query_values)
     try:
+        # Inside the try: this count runs under the same statement timeout.
+        flag_warning = _flag_state_warning(scope_before_flags, flag_filters)
         raw_count = q.order_by(None).count()
         key_expression = _dedupe_key(deduplicate)
         if deduplicate == "none":
@@ -1102,6 +1169,8 @@ def search_mail_regex(
             last.id,
         )
     coverage, warnings = _account_coverage(db, user, account_id)
+    if flag_warning:
+        warnings.append(flag_warning)
     return {
         "items": items,
         "total_count": int(total_count),

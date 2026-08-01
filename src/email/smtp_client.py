@@ -513,13 +513,19 @@ class SMTPClient:
         return None
 
     @staticmethod
-    def _extract_flags(lines) -> str:
+    def _extract_flags(lines) -> str | None:
+        """Return the FLAGS list, or None when the response carried none.
+
+        The empty string is a meaningful answer: FLAGS () says the message has no
+        flags and is therefore unread. None says the server never told us, which
+        must not be read as unread.
+        """
         for line in lines:
             if isinstance(line, bytes):
                 match = re.search(rb"\bFLAGS\s+\(([^)]*)\)", line)
                 if match:
                     return match.group(1).decode("ascii", errors="ignore")
-        return ""
+        return None
 
     @staticmethod
     def _extract_raw_email(lines) -> bytes:
@@ -541,7 +547,7 @@ class SMTPClient:
         *,
         folder: str,
         uid_validity: int | None,
-        flags: str = "",
+        flags: str | None = None,
     ) -> Optional[Dict]:
         """Parse raw email data into structured format."""
         try:

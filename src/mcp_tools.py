@@ -268,7 +268,13 @@ def register_mcp_tools(mcp) -> None:
             "Exhaustively search owned mail with exact counts, stable cursor pagination, "
             "participant/domain facets, match provenance, deduplication, and sync coverage. "
             "Trash, Spam and Junk folders are excluded unless named in folders, or "
-            "exclude_folders is set to an empty list."
+            "exclude_folders is set to an empty list. "
+            "match='stemmed' finds inflected forms of a word, so 'invoice' also finds "
+            "'invoices' and 'Rechnung' also finds 'Rechnungen'; use match='exact' for "
+            "identifiers, order numbers and surnames, which a stemmer would widen. "
+            "is_unread, is_flagged and is_answered filter on read state; messages whose "
+            "provider never reported flags cannot match either value and are counted in a "
+            "FLAG_STATE_UNKNOWN warning rather than being silently dropped."
         ),
         annotations=READ_ONLY,
     )
@@ -284,6 +290,10 @@ def register_mcp_tools(mcp) -> None:
         search_attachments: bool = False,
         folders: list[str] | None = None,
         exclude_folders: list[str] | None = None,
+        is_unread: bool | None = None,
+        is_flagged: bool | None = None,
+        is_answered: bool | None = None,
+        match: Literal["stemmed", "exact"] = "stemmed",
         limit: int = 50,
         cursor: str | None = None,
         deduplicate: Literal["none", "exact", "mirror"] = "exact",
@@ -303,6 +313,10 @@ def register_mcp_tools(mcp) -> None:
                 search_attachments=search_attachments,
                 folders=folders,
                 exclude_folders=exclude_folders,
+                is_unread=is_unread,
+                is_flagged=is_flagged,
+                is_answered=is_answered,
+                match=match,
                 limit=limit,
                 cursor=cursor,
                 deduplicate=deduplicate,
@@ -330,6 +344,9 @@ def register_mcp_tools(mcp) -> None:
         date_to: str | None = None,
         folders: list[str] | None = None,
         exclude_folders: list[str] | None = None,
+        is_unread: bool | None = None,
+        is_flagged: bool | None = None,
+        is_answered: bool | None = None,
         limit: int = 25,
         cursor: str | None = None,
         deduplicate: Literal["none", "exact", "mirror"] = "exact",
@@ -347,6 +364,9 @@ def register_mcp_tools(mcp) -> None:
                 date_to=_date(date_to),
                 folders=folders,
                 exclude_folders=exclude_folders,
+                is_unread=is_unread,
+                is_flagged=is_flagged,
+                is_answered=is_answered,
                 limit=limit,
                 cursor=cursor,
                 deduplicate=deduplicate,

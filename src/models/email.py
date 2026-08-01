@@ -1,6 +1,16 @@
 """Email model for synced messages."""
 
-from sqlalchemy import BigInteger, Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Column,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -34,6 +44,11 @@ class EmailLog(Base):
     imap_uid = Column(Integer, nullable=True)
     uid_validity = Column(Integer, nullable=True)
     flags = Column(Text, nullable=True)
+    # Normalised from flags, because IMAP and the Gmail API disagree about both
+    # the encoding and the polarity. NULL means nothing was ever observed.
+    is_unread = Column(Boolean, nullable=True)
+    is_flagged = Column(Boolean, nullable=True)
+    is_answered = Column(Boolean, nullable=True)
     in_reply_to = Column(String(255), nullable=True)
     references = Column(Text, nullable=True)
     content_fingerprint = Column(String(32), nullable=True, index=True)

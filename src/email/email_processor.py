@@ -12,6 +12,7 @@ from sqlalchemy import or_
 from src.database.connection import SessionLocal, get_db_session
 from src.email import sanitize_db_text
 from src.email.gmail_api_client import GmailApiClient, GmailHistoryExpired
+from src.email.message_flags import apply_flag_state
 from src.email.smtp_client import SMTPClient
 from src.email.text_extractor import TextExtractor
 from src.models.email import EmailLog
@@ -75,10 +76,10 @@ def apply_folder_snapshots(db, *, config_id: int, snapshots: dict) -> None:
             if placement.uid_validity is not None and placement.uid_validity != validity:
                 continue
             if placement.uid in available:
-                if placement.uid in flags:
+                if flags.get(placement.uid) is not None:
                     message = db.get(EmailLog, placement.email_log_id)
                     if message is not None:
-                        message.flags = flags[placement.uid]
+                        apply_flag_state(message, flags[placement.uid])
                 continue
             db.delete(placement)
 
@@ -750,7 +751,7 @@ class EmailProcessor:
                         existing_email.provider_thread_id = sanitize_db_text(
                             email_data.get("provider_thread_id")
                         )
-                        existing_email.flags = sanitize_db_text(email_data.get("flags"))
+                        apply_flag_state(existing_email, email_data.get("flags"))
                         existing_email.provider_size = (
                             email_data.get("provider_size")
                             or existing_email.provider_size
@@ -800,7 +801,7 @@ class EmailProcessor:
                         legacy_email.folder = email_data.get("folder")
                         legacy_email.imap_uid = email_data.get("imap_uid")
                         legacy_email.uid_validity = email_data.get("uid_validity")
-                        legacy_email.flags = sanitize_db_text(email_data.get("flags"))
+                        apply_flag_state(legacy_email, email_data.get("flags"))
                         legacy_email.provider_size = email_data.get("provider_size")
                         legacy_email.content_state = email_data.get(
                             "content_state",
@@ -848,7 +849,6 @@ class EmailProcessor:
                         folder=sanitize_db_text(email_data.get("folder")),
                         imap_uid=email_data.get("imap_uid"),
                         uid_validity=email_data.get("uid_validity"),
-                        flags=sanitize_db_text(email_data.get("flags")),
                         to_addresses=sanitize_db_text(email_data.get("to_addresses")),
                         cc_addresses=sanitize_db_text(email_data.get("cc_addresses")),
                         bcc_addresses=sanitize_db_text(email_data.get("bcc_addresses")),
@@ -868,6 +868,7 @@ class EmailProcessor:
                         body_plain=body_plain,
                         body_html=body_html,
                     )
+                    apply_flag_state(email_log, email_data.get("flags"))
 
                     db.add(email_log)
                     db.flush()

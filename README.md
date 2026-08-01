@@ -25,7 +25,7 @@ accounts. One string is blurred: a case number belonging to a real filing.</sub>
 |---|---|---|
 | Transport | Remote HTTP endpoint | Local stdio process on your machine |
 | Setup on the client | Paste a URL | Install a runtime, edit config JSON, store credentials locally |
-| Search | Own PostgreSQL index, GIN full-text | Live IMAP `SEARCH` per call |
+| Search | Own PostgreSQL index, GIN full-text, stemmed across languages | Live IMAP `SEARCH` per call |
 | Result completeness | Exact `total_count`, signed cursors, per-account coverage | Whatever the folder returned |
 | Attachments | Text extracted and indexed at sync time (PDF, DOCX, XLSX, PPTX, OCR) | Base64 into the model's context, or not at all |
 | Attachment binaries | Never stored; refetched through a 5-minute signed URL | Stored on disk or inlined |
@@ -220,6 +220,22 @@ source account and message ID; `mirror` also groups normalized body copies; `non
 returns every stored row. Responses additionally report matching fields,
 participant-domain facets, and per-account sync coverage.
 
+**Stemming.** `match` defaults to `stemmed`, which finds inflected forms of a
+word: on a real 52,000-message mailbox `invoices` goes from 104 hits to 1,016 and
+`Verträge` from 133 to 1,168. The cost is precision — `meeting` also matches
+`meet` — so pass `match="exact"` for order numbers, identifiers and surnames,
+which a stemmer would widen. Both modes are indexed; every response reports which
+one ran.
+
+**Read state.** `is_unread`, `is_flagged` and `is_answered` filter on flags
+mirrored from the provider. They are tri-state: a message whose provider never
+reported flags matches neither `true` nor `false`, and search returns a
+`FLAG_STATE_UNKNOWN` warning saying how many messages that removed, rather than
+quietly reporting them as read. Gmail publishes no answered label, so
+`is_answered` is always unknown for Gmail OAuth accounts. Flags are refreshed by
+the periodic reconciler, so they lag the mailbox by up to
+`EMAILSERVER_DELETION_RECONCILE_INTERVAL`.
+
 `get_mail` and `get_thread` return bounded plain text by default; HTML must be
 requested explicitly. `send_mail` accepts owned `attachment_ids` and refetches each
 original binary from its provider before sending.
@@ -267,7 +283,29 @@ The parts that make search trustworthy rather than best-effort:
 - Account work is bounded by a global concurrency limit and protected by expiring
   database leases, so two workers cannot sync one mailbox and a crashed worker cannot
   hold a permanent lock.
-- PostgreSQL GIN indexes back lexical body and attachment search.
+- PostgreSQL GIN indexes back lexical body and attachment search. The same text
+  is indexed once per configured language and stored as one combined vector, so
+  a German invoice and an English newsletter are both stemmed correctly in the
+  same mailbox; identical lexemes collapse, so the union costs about as much as
+  the unstemmed index it sits beside. `EMAILSERVER_SEARCH_TEXT_CONFIGS` selects
+  the languages and defaults to `["simple", "english", "german"]`. Changing it
+  needs a matching index, which the migration only builds once:
+
+  ```sql
+  CREATE INDEX CONCURRENTLY ix_email_logs_search_fts_simple_english_french
+    ON email_logs USING gin ((
+        to_tsvector('simple',  coalesce(sender,'')||' '||coalesce(recipient,'')||' '||coalesce(subject,'')||' '||coalesce(body_plain,''))
+     || to_tsvector('english', coalesce(sender,'')||' '||coalesce(recipient,'')||' '||coalesce(subject,'')||' '||coalesce(body_plain,''))
+     || to_tsvector('french',  coalesce(sender,'')||' '||coalesce(recipient,'')||' '||coalesce(subject,'')||' '||coalesce(body_plain,''))
+    ));
+  ```
+
+  Without it search still returns the same answer, by scanning every stored body.
+- Provider flags are normalised at sync time into `is_unread`, `is_flagged` and
+  `is_answered`. IMAP reports that a message *was read* and the Gmail API reports
+  that it *was not*, in two different encodings; neither is filterable as stored.
+  A message the provider never reported flags for stays null rather than
+  defaulting to read.
 - Attachment text is extracted at sync time. Image attachments are OCR'd in
   every language installed in the image, because tesseract given no language
   assumes English and mangles accented scripts: German umlauts come back as

@@ -55,6 +55,13 @@ class Settings(BaseSettings):
     store_text_only: bool = False
     max_attachment_size_text: int = 10 * 1024 * 1024  # Max size for text extraction
 
+    # Full-text search. "simple" indexes words verbatim and is always present, so
+    # an exact search can never be widened by a stemmer. Every further entry adds a
+    # Snowball-stemmed copy of the same text to one combined index, which is what
+    # makes "invoice" find "invoices" and "Rechnung" find "Rechnungen". Changing
+    # this list requires rebuilding the index; see the README.
+    search_text_configs: list[str] = ["simple", "english", "german"]
+
     # OCR. Empty uses every language installed in the image, which is the only
     # way image attachments in mixed-language mailboxes get read correctly.
     # Pin a subset such as "deu+eng" to trade coverage for speed.

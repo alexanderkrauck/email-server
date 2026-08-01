@@ -12,7 +12,7 @@ from sqlalchemy import or_
 from src.database.connection import SessionLocal, get_db_session
 from src.email import sanitize_db_text
 from src.email.gmail_api_client import GmailApiClient, GmailHistoryExpired
-from src.email.message_flags import apply_flag_state
+from src.email.message_flags import apply_flag_state, normalize_flags
 from src.email.smtp_client import SMTPClient
 from src.email.text_extractor import TextExtractor
 from src.models.email import EmailLog
@@ -41,6 +41,12 @@ def upsert_placement(db, email_log_id: int, folder: str | None, uid: int | None,
     db.add(MessagePlacement(email_log_id=email_log_id, folder=folder, uid=uid, uid_validity=uid_validity))
 
 
+def _chunks(values, size: int = 1000):
+    values = list(values)
+    for start in range(0, len(values), size):
+        yield values[start : start + size]
+
+
 def apply_folder_snapshots(db, *, config_id: int, snapshots: dict) -> None:
     """Mirror one full pass over every folder into placements.
 
@@ -48,59 +54,124 @@ def apply_folder_snapshots(db, *, config_id: int, snapshots: dict) -> None:
     pass discovers it in its new folder and upserts by identity, which is far cheaper
     than fetching a Message-ID header for every UID in the mailbox. This function only
     retires placements and tombstones messages that lost every placement they had.
-    """
-    now = datetime.now(tz=timezone.utc)
 
-    # Load the account's placements once. A query per UID would be tens of thousands
-    # of round trips per cycle on a large mailbox.
-    existing = (
-        db.query(MessagePlacement)
+    Everything is set-based. Loading an EmailLog per placement pulls body_plain and
+    body_html into the session for every message in the mailbox: on a 27,000-message
+    account that is 1.2 GB, which killed the container and left the pass unable to
+    finish, so last_reconciled_at never advanced and the next cycle retried forever.
+    """
+    from src.config import settings
+    from src.services.mail_service import is_excluded_folder
+
+    now = datetime.now(tz=timezone.utc)
+    excluded = settings.excluded_folder_suffixes
+
+    # Columns only: 27,000 tuples is fine, 27,000 mapped objects with bodies is not.
+    rows = (
+        db.query(
+            MessagePlacement.id,
+            MessagePlacement.email_log_id,
+            MessagePlacement.folder,
+            MessagePlacement.uid,
+            MessagePlacement.uid_validity,
+        )
         .join(EmailLog, EmailLog.id == MessagePlacement.email_log_id)
         .filter(EmailLog.smtp_config_id == config_id)
         .all()
     )
-    by_folder: dict[str, list] = {}
-    for placement in existing:
-        by_folder.setdefault(placement.folder, []).append(placement)
 
     # Only a message that demonstrably had a placement can be judged missing. Rows
     # that predate the folder column have none and must never be touched.
-    candidates = {placement.email_log_id for placement in existing}
+    candidates = {row.email_log_id for row in rows}
+    retired: list[int] = []
+    observed: dict[int, tuple[tuple, str]] = {}
 
-    for folder, state in snapshots.items():
-        available = state["uids"]
-        flags = state["flags"]
-        validity = state["uid_validity"]
-        for placement in by_folder.get(folder, []):
-            # A UIDVALIDITY change renumbers every UID; that is not a deletion.
-            if placement.uid_validity is not None and placement.uid_validity != validity:
-                continue
-            if placement.uid in available:
-                if flags.get(placement.uid) is not None:
-                    message = db.get(EmailLog, placement.email_log_id)
-                    if message is not None:
-                        apply_flag_state(message, flags[placement.uid])
-                continue
-            db.delete(placement)
+    for row in rows:
+        state = snapshots.get(row.folder)
+        if state is None:
+            continue
+        # A UIDVALIDITY change renumbers every UID; that is not a deletion.
+        if row.uid_validity is not None and row.uid_validity != state["uid_validity"]:
+            continue
+        if row.uid not in state["uids"]:
+            retired.append(row.id)
+            continue
+        raw = state["flags"].get(row.uid)
+        if raw is None:
+            continue
+        # A message can sit in INBOX and Trash at once. Take the live folder's flags,
+        # then the first folder by name; without a rule this was decided by whichever
+        # folder the snapshot dict happened to yield last.
+        key = (is_excluded_folder(row.folder, excluded), row.folder or "")
+        current = observed.get(row.email_log_id)
+        if current is None or key < current[0]:
+            observed[row.email_log_id] = (key, raw)
+
+    for chunk in _chunks(retired):
+        db.query(MessagePlacement).filter(MessagePlacement.id.in_(chunk)).delete(
+            synchronize_session=False
+        )
+
+    by_flags: dict[str, list[int]] = {}
+    for email_log_id, (_key, raw) in observed.items():
+        by_flags.setdefault(raw, []).append(email_log_id)
+
+    for raw, ids in by_flags.items():
+        state = normalize_flags(raw)
+        stored = sanitize_db_text(raw)
+        values = {
+            "flags": stored,
+            "is_unread": state.is_unread,
+            "is_flagged": state.is_flagged,
+            "is_answered": state.is_answered,
+        }
+        for chunk in _chunks(ids):
+            # is_distinct_from keeps an unchanged mailbox from rewriting every row,
+            # which would rebuild two GIN body indexes on every pass.
+            db.query(EmailLog).filter(
+                EmailLog.smtp_config_id == config_id,
+                EmailLog.id.in_(chunk),
+                EmailLog.flags.is_distinct_from(stored),
+            ).update(values, synchronize_session=False)
 
     db.flush()
 
     if not candidates:
         return
-    survivors = {
-        row[0]
-        for row in db.query(MessagePlacement.email_log_id)
-        .filter(MessagePlacement.email_log_id.in_(candidates))
-        .all()
-    }
-    for message_id in candidates - survivors:
-        message = db.get(EmailLog, message_id)
-        if message is None:
-            continue
-        # Always tombstone, whatever upstream_delete_policy says. A message is briefly
-        # unplaced while a move is in flight, and reap_tombstoned_messages performs the
-        # physical removal once the account is healthy and the grace period has passed.
-        message.deleted_at = now
+    survivors: set[int] = set()
+    for chunk in _chunks(candidates):
+        survivors.update(
+            row[0]
+            for row in db.query(MessagePlacement.email_log_id)
+            .filter(MessagePlacement.email_log_id.in_(chunk))
+            .all()
+        )
+    doomed = candidates - survivors
+    # A census that silently came back short looks exactly like a mailbox someone
+    # emptied. Refuse rather than guess: no real cycle retires a large fraction of
+    # an account at once, and a refusal costs one stale cycle where a wrong
+    # inference costs the mail.
+    limit = max(20, min(200, len(candidates) // 50))
+    if len(doomed) > limit:
+        logger.error(
+            "Refusing to tombstone %d of %d message(s) on account %s in one pass "
+            "(limit %d): the folder census is probably incomplete",
+            len(doomed),
+            len(candidates),
+            config_id,
+            limit,
+        )
+        return
+
+    # Always tombstone, whatever upstream_delete_policy says. A message is briefly
+    # unplaced while a move is in flight, and reap_tombstoned_messages performs the
+    # physical removal once the account is healthy and the grace period has passed.
+    for chunk in _chunks(sorted(doomed)):
+        db.query(EmailLog).filter(
+            EmailLog.smtp_config_id == config_id,
+            EmailLog.id.in_(chunk),
+            EmailLog.deleted_at.is_(None),
+        ).update({"deleted_at": now}, synchronize_session=False)
 
 
 def reap_tombstoned_messages(db, *, config_id: int, now: datetime | None = None) -> int:

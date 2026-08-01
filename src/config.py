@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     deletion_reconcile_interval: int = 21_600
     # The reconciler always tombstones; physical removal happens after the grace
     # period, so a wrong deletion inference stays recoverable for a few days.
-    upstream_delete_policy: Literal["hard_delete", "tombstone", "retain"] = "hard_delete"
+    upstream_delete_policy: Literal["hard_delete", "tombstone", "retain"] = "tombstone"
     tombstone_grace_days: int = 7
     # Matched as suffixes: real folders are "INBOX.Trash", "INBOX.SPAM",
     # "[Google Mail]/Trash". Exact names match almost nothing.

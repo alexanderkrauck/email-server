@@ -244,3 +244,51 @@ def test_an_unhealthy_account_is_never_reaped(db):
 
     assert reap_tombstoned_messages(db, config_id=1, now=now) == 0
     assert db.query(EmailLog).count() == 1
+
+
+def test_a_short_census_is_refused_rather_than_tombstoning_the_account(db):
+    """An incomplete folder listing looks exactly like an emptied mailbox."""
+    from src.email.email_processor import apply_folder_snapshots
+
+    for index in range(25):
+        message = make_message(db, identity=f"<bulk{index}@example.com>")
+        db.add(
+            MessagePlacement(
+                email_log_id=message.id, folder="INBOX", uid=index + 1, uid_validity=1
+            )
+        )
+    db.commit()
+
+    # Every placement is still there, but the census came back empty.
+    apply_folder_snapshots(
+        db,
+        config_id=1,
+        snapshots={"INBOX": {"uid_validity": 1, "uids": set(), "flags": {}}},
+    )
+
+    assert db.query(EmailLog).filter(EmailLog.deleted_at.is_not(None)).count() == 0
+
+
+def test_a_handful_of_real_deletions_still_tombstones(db):
+    """The circuit breaker must not disable ordinary deletion mirroring."""
+    from src.email.email_processor import apply_folder_snapshots
+
+    for index in range(25):
+        message = make_message(db, identity=f"<bulk{index}@example.com>")
+        db.add(
+            MessagePlacement(
+                email_log_id=message.id, folder="INBOX", uid=index + 1, uid_validity=1
+            )
+        )
+    db.commit()
+
+    # All but two are still upstream.
+    apply_folder_snapshots(
+        db,
+        config_id=1,
+        snapshots={
+            "INBOX": {"uid_validity": 1, "uids": set(range(1, 24)), "flags": {}}
+        },
+    )
+
+    assert db.query(EmailLog).filter(EmailLog.deleted_at.is_not(None)).count() == 2

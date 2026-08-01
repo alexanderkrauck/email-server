@@ -40,6 +40,10 @@ services:
       # inference destroy mail irreversibly.
       - EMAILSERVER_UPSTREAM_DELETE_POLICY=${EMAILSERVER_UPSTREAM_DELETE_POLICY:-tombstone}
       - EMAILSERVER_TOMBSTONE_GRACE_DAYS=${EMAILSERVER_TOMBSTONE_GRACE_DAYS:-7}
+      # Seconds between full folder censuses. Overridable because a census that
+      # cannot complete has no way to stop itself: the interval guard is only
+      # cleared after the pass succeeds, so a failing pass retries forever.
+      - EMAILSERVER_DELETION_RECONCILE_INTERVAL=${EMAILSERVER_DELETION_RECONCILE_INTERVAL:-21600}
       - EMAILSERVER_AUTH_MODE=${EMAILSERVER_AUTH_MODE:-development}
       - EMAILSERVER_API_TOKEN=${EMAILSERVER_API_TOKEN:-}
       - EMAILSERVER_PUBLIC_BASE_URL=${EMAILSERVER_PUBLIC_BASE_URL:-http://localhost:8002}

@@ -239,6 +239,7 @@ def test_a_truncated_batch_says_so():
     outcome = _outcome(selection, 500)
 
     assert outcome["truncated"] is True
+    assert outcome["skipped"] == 0
     assert outcome["matched"] == 8058
     assert outcome["affected"] == 500
     assert "8058" in outcome["note"]
@@ -275,3 +276,19 @@ def test_nested_folders_are_found_by_either_delimiter():
 
     assert child_folders(folders, "Projekte") == ["Projekte/2026"]
     assert child_folders(folders, "INBOX.Projekte") == ["INBOX.Projekte.Alt"]
+
+
+def test_skipped_messages_are_grouped_by_reason():
+    """A 2,600 message batch must not repeat one sentence hundreds of times."""
+    from src.services.write_service import _summarise_skipped
+
+    summary = _summarise_skipped(
+        [{"email_id": index, "reason": "no folder"} for index in range(50)]
+        + [{"email_id": 900, "reason": "not found"}]
+    )
+
+    assert [entry["reason"] for entry in summary] == ["no folder", "not found"]
+    assert summary[0]["count"] == 50
+    assert len(summary[0]["email_ids"]) == 20
+    assert summary[0]["email_ids_truncated"] is True
+    assert summary[1]["email_ids_truncated"] is False

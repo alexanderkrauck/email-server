@@ -95,9 +95,10 @@ def writable_placement(db: Session, message: EmailLog) -> MessagePlacement:
         raise HTTPException(
             status_code=409,
             detail=(
-                "This message has no known folder, so it cannot be addressed upstream. "
-                "Run scripts/repair_placements.py to locate messages stored before "
-                "folders were tracked."
+                "No known folder, so this message cannot be addressed upstream. It was "
+                "either stored before folders were tracked, or it has since moved "
+                "somewhere this account does not sync -- on Gmail, All Mail excludes "
+                "Bin and Spam, so mail deleted there leaves the indexed folder."
             ),
         )
     suffixes = settings.excluded_folder_suffixes
@@ -195,13 +196,34 @@ def _select(db: Session, user: User, email_ids: list[int] | None, filters: dict,
     return Selection(account=account, targets=targets, matched=matched, skipped=skipped)
 
 
+def _summarise_skipped(skipped: list[dict]) -> list[dict]:
+    """One entry per reason, not one per message.
+
+    A batch of 2,600 can skip hundreds for the same cause, and repeating the same
+    sentence hundreds of times buries the result it is attached to.
+    """
+    grouped: dict[str, list[int]] = {}
+    for entry in skipped:
+        grouped.setdefault(entry["reason"], []).append(entry["email_id"])
+    return [
+        {
+            "reason": reason,
+            "count": len(ids),
+            "email_ids": sorted(ids)[:20],
+            "email_ids_truncated": len(ids) > 20,
+        }
+        for reason, ids in sorted(grouped.items(), key=lambda item: -len(item[1]))
+    ]
+
+
 def _outcome(selection: Selection, limit: int | None, **extra) -> dict:
     result = {
         "success": True,
         "account_id": selection.account.id,
         "matched": selection.matched,
         "affected": len(selection.targets),
-        "skipped": selection.skipped,
+        "skipped": len(selection.skipped),
+        "skipped_reasons": _summarise_skipped(selection.skipped),
         **extra,
     }
     if selection.matched > len(selection.targets) + len(selection.skipped):

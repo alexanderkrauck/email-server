@@ -33,6 +33,7 @@ from email import message_from_bytes, policy
 from sqlalchemy import bindparam, func, update
 
 from src.database.connection import SessionLocal
+from src.email.imap_writer import list_folders
 from src.email.message_flags import normalize_flags
 from src.email.smtp_client import SMTPClient
 from src.models.email import EmailLog
@@ -128,7 +129,11 @@ async def plan_account(account: SMTPConfig, blind_rows: dict[str, list[int]]) ->
         raise RuntimeError(f"cannot connect to {account.name}")
     try:
         upstream: dict[str, list[tuple[str, int, int, str | None]]] = {}
-        for folder in await client._get_folders():
+        # Every selectable folder, not the folders the syncer indexes. For Gmail
+        # those differ: the syncer reads All Mail alone, and All Mail deliberately
+        # excludes Bin and Spam -- so mail deleted in Gmail is invisible to a sweep
+        # that only looks where the syncer looks.
+        for folder in [item["name"] for item in await list_folders(client)]:
             try:
                 for identity, (uid, validity, flags) in (await _sweep_folder(client, folder)).items():
                     upstream.setdefault(identity, []).append((folder, uid, validity, flags))

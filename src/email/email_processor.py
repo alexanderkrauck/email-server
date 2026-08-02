@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import List
 
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 
 from src.database.connection import SessionLocal, get_db_session
 from src.email import sanitize_db_text
@@ -39,6 +39,75 @@ def upsert_placement(db, email_log_id: int, folder: str | None, uid: int | None,
         placement.seen_at = datetime.now(tz=timezone.utc)
         return
     db.add(MessagePlacement(email_log_id=email_log_id, folder=folder, uid=uid, uid_validity=uid_validity))
+
+
+def mailbox_key(account: SMTPConfig) -> tuple[str, int, str]:
+    """What a lease must actually protect.
+
+    Two smtp_configs rows can name the same physical mailbox -- in production two
+    do, under different owners. A lease keyed on the row id would let a write on
+    one run concurrently with a census on the other, and an untagged EXPUNGE
+    landing mid-census renumbers the sequence numbers the census is reading.
+    """
+    return (account.host, account.port, (account.username or "").lower())
+
+
+def acquire_mailbox_lease(db, account: SMTPConfig, *, seconds: int) -> str | None:
+    """Take the sync lease on every account row sharing this mailbox.
+
+    Returns a token, or None if any of them is already held. One statement, so
+    there is no window between testing and taking.
+    """
+    now = datetime.now(tz=timezone.utc)
+    token = uuid.uuid4().hex
+    host, port, username = mailbox_key(account)
+    siblings = (
+        db.query(SMTPConfig)
+        .filter(
+            SMTPConfig.host == host,
+            SMTPConfig.port == port,
+            func.lower(SMTPConfig.username) == username,
+        )
+        .count()
+    )
+    updated = (
+        db.query(SMTPConfig)
+        .filter(
+            SMTPConfig.host == host,
+            SMTPConfig.port == port,
+            func.lower(SMTPConfig.username) == username,
+            or_(
+                SMTPConfig.sync_lock_expires_at.is_(None),
+                SMTPConfig.sync_lock_expires_at < now,
+            ),
+        )
+        .update(
+            {
+                SMTPConfig.sync_lock_token: token,
+                SMTPConfig.sync_locked_at: now,
+                SMTPConfig.sync_lock_expires_at: now + timedelta(seconds=seconds),
+            },
+            synchronize_session=False,
+        )
+    )
+    if updated != siblings:
+        # Partial acquisition is not acquisition: release what was taken.
+        db.rollback()
+        return None
+    db.commit()
+    return token
+
+
+def release_mailbox_lease(db, token: str) -> None:
+    db.query(SMTPConfig).filter(SMTPConfig.sync_lock_token == token).update(
+        {
+            SMTPConfig.sync_lock_token: None,
+            SMTPConfig.sync_locked_at: None,
+            SMTPConfig.sync_lock_expires_at: None,
+        },
+        synchronize_session=False,
+    )
+    db.commit()
 
 
 def _chunks(values, size: int = 1000):

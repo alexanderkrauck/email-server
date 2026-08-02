@@ -44,6 +44,10 @@ services:
       # cannot complete has no way to stop itself: the interval guard is only
       # cleared after the pass succeeds, so a failing pass retries forever.
       - EMAILSERVER_DELETION_RECONCILE_INTERVAL=${EMAILSERVER_DELETION_RECONCILE_INTERVAL:-300}
+      # Mailbox writes are off unless an operator opts in, and the allowlist is
+      # operator-level: it crosses tenants, so an empty list means every account.
+      - EMAILSERVER_MAIL_WRITE_ENABLED=${EMAILSERVER_MAIL_WRITE_ENABLED:-false}
+      - EMAILSERVER_MAIL_WRITE_ALLOWED_ACCOUNT_IDS=${EMAILSERVER_MAIL_WRITE_ALLOWED_ACCOUNT_IDS:-[]}
       - EMAILSERVER_AUTH_MODE=${EMAILSERVER_AUTH_MODE:-development}
       - EMAILSERVER_API_TOKEN=${EMAILSERVER_API_TOKEN:-}
       - EMAILSERVER_PUBLIC_BASE_URL=${EMAILSERVER_PUBLIC_BASE_URL:-http://localhost:8002}

@@ -22,6 +22,7 @@ async def test_mcp_tool_surface_is_narrow_and_annotated():
         "get_thread",
         "get_attachment",
         "send_mail",
+        "mark_mail",
     }
     assert all(tool.annotations is not None for tool in tools)
     assert next(tool for tool in tools if tool.name == "search_mail").annotations.readOnlyHint is True

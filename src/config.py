@@ -125,6 +125,16 @@ class Settings(BaseSettings):
     max_outbound_attachment_bytes: int = 25 * 1024 * 1024
     max_outbound_attachments: int = 20
 
+    # Mailbox writes. Off by default: this server's other tools cannot damage a
+    # mailbox, and that should stay true unless an operator opts in. The
+    # allowlist is operator-level and crosses tenants; an empty list means every
+    # account, and changing either requires recreating the container.
+    mail_write_enabled: bool = False
+    mail_write_allowed_account_ids: list[int] = []
+    max_writes_per_minute: int = 30
+    # How long a write waits for a sync pass to release the mailbox before giving up.
+    mail_write_lease_wait_seconds: float = 20.0
+
     # Logging
     log_level: str = "INFO"
     log_file: str = ""  # Empty = stdout only (stateless). Set to path for file logging.

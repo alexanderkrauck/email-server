@@ -47,6 +47,7 @@ from src.services.mail_service import (
 from src.services.mail_service import (
     send_mail as send_message,
 )
+from src.services.write_service import mark_mail as mark_message
 
 READ_ONLY = ToolAnnotations(
     readOnlyHint=True,
@@ -321,6 +322,27 @@ def register_mcp_tools(mcp) -> None:
                 cursor=cursor,
                 deduplicate=deduplicate,
             )
+
+    @mcp.tool(
+        name="mark_mail",
+        description=(
+            "Set or clear the read or flagged state of one message, in the mailbox "
+            "itself and then in the index. Acts on the live copy of the message, not "
+            "on a copy sitting in Trash. Refuses when the mailbox is mid-sync, when "
+            "the message has no known folder, or when the server does not confirm the "
+            "new flags -- in every refusal nothing is changed. Disabled unless the "
+            "operator has turned mailbox writes on."
+        ),
+        annotations=WRITE_EXTERNAL,
+    )
+    @mcp_error_boundary
+    async def mark_mail(
+        email_id: int,
+        mark: Literal["read", "unread", "flagged", "unflagged"],
+    ) -> dict:
+        user = await current_mcp_user()
+        with SessionLocal() as db:
+            return await mark_message(db, user, email_id=email_id, mark=mark)
 
     @mcp.tool(
         name="search_mail_regex",

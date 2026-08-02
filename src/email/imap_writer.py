@@ -115,25 +115,33 @@ def expand_uid_set(value: str) -> list[int]:
     return uids
 
 
-def parse_copyuid(lines) -> dict[int, int]:
-    """Map each source UID to where it landed, from the COPYUID response.
+def parse_copyuid(lines) -> tuple[int | None, dict[int, int]]:
+    """The destination UIDVALIDITY and each source UID's new UID.
 
     RFC 4315 guarantees the two sets correspond position by position, so this has
     to zip them rather than take the first: a batched move of twenty messages
     would otherwise record one destination UID for all twenty.
+
+    The validity is the first field of COPYUID and belongs to the *destination*
+    folder. Discarding it and reusing the source folder's would stamp a UID from
+    one numbering space with the identifier of another, which is indistinguishable
+    from the folder having been renumbered.
     """
     for line in lines:
         if not isinstance(line, (bytes, bytearray)):
             continue
         match = COPYUID.search(bytes(line))
         if match:
+            validity = int(match.group(1))
             source = expand_uid_set(match.group(2).decode("ascii", errors="ignore"))
             destination = expand_uid_set(match.group(3).decode("ascii", errors="ignore"))
-            return dict(zip(source, destination, strict=False))
-    return {}
+            return validity, dict(zip(source, destination, strict=False))
+    return None, {}
 
 
-async def move_messages(client, source: str, uids: list[int], destination: str) -> dict[int, int]:
+async def move_messages(
+    client, source: str, uids: list[int], destination: str
+) -> dict[int, tuple[int, int | None]]:
     """Move messages between folders in one command. Returns source UID -> new UID.
 
     Prefers UID MOVE (RFC 6851). The COPY/STORE fallback deliberately does not
@@ -147,20 +155,25 @@ async def move_messages(client, source: str, uids: list[int], destination: str) 
         raise ImapWriteError(f"cannot select {source}")
 
     capabilities = {item.upper() for item in getattr(client.client.protocol, "capabilities", set())}
-    landed: dict[int, int] = {}
+    landed: dict[int, tuple[int, int | None]] = {}
+
+    def record(response) -> None:
+        validity, mapping = parse_copyuid(response.lines)
+        landed.update({source_uid: (new_uid, validity) for source_uid, new_uid in mapping.items()})
+
     for chunk in uid_chunks(uids):
         sequence = ",".join(str(uid) for uid in chunk)
         if "MOVE" in capabilities:
             response = await client.client.uid("move", sequence, f'"{destination}"')
             if response.result != "OK":
                 raise ImapWriteError(f"MOVE to {destination} failed: {response.result}")
-            landed.update(parse_copyuid(response.lines))
+            record(response)
             continue
 
         response = await client.client.uid("copy", sequence, f'"{destination}"')
         if response.result != "OK":
             raise ImapWriteError(f"COPY to {destination} failed: {response.result}")
-        landed.update(parse_copyuid(response.lines))
+        record(response)
 
         marked = await client.client.uid("store", sequence, "+FLAGS", "(\\Deleted)")
         if marked.result != "OK":

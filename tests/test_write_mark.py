@@ -222,12 +222,10 @@ def test_a_batched_copyuid_maps_each_source_to_its_own_destination():
     from src.email.imap_writer import expand_uid_set, parse_copyuid
 
     assert expand_uid_set("3,7:9") == [3, 7, 8, 9]
-    assert parse_copyuid([b"OK [COPYUID 12345 3,7:9 100,201:203] Move completed"]) == {
-        3: 100,
-        7: 201,
-        8: 202,
-        9: 203,
-    }
+    assert parse_copyuid([b"OK [COPYUID 12345 3,7:9 100,201:203] Move completed"]) == (
+        12345,
+        {3: 100, 7: 201, 8: 202, 9: 203},
+    )
 
 
 def test_a_truncated_batch_says_so():
@@ -340,3 +338,64 @@ def test_a_folder_that_was_never_synced_is_not_called_stale(db):
     assert writable_placement(
         db, db.get(EmailLog, 100), validities=current_validities(db, 1)
     ).folder == "INBOX"
+
+
+def test_copyuid_reports_the_destination_folder_validity():
+    """Reusing the source folder's would read as a renumbered folder for ever."""
+    from src.email.imap_writer import parse_copyuid
+
+    validity, mapping = parse_copyuid([b"OK [COPYUID 649459793 3,7:9 100,201:203] Move completed"])
+
+    assert validity == 649459793
+    assert mapping == {3: 100, 7: 201, 8: 202, 9: 203}
+
+
+def test_an_unconfirmed_move_keeps_the_old_location(db):
+    """Deleting it would strand the message where nothing censuses it."""
+    from src.services.write_service import Selection, _reflect_move
+
+    placement = MessagePlacement(email_log_id=100, folder="INBOX", uid=9, uid_validity=1)
+    db.add(placement)
+    db.commit()
+    message = db.get(EmailLog, 100)
+    selection = Selection(
+        account=db.get(SMTPConfig, 1), targets=[(message, placement)], matched=1, skipped=[]
+    )
+
+    outcome = _reflect_move(db, selection, "Archive", {"INBOX": {}})
+
+    assert outcome["moved"] == 0
+    assert outcome["unconfirmed"] == 1
+    assert db.query(MessagePlacement).one().folder == "INBOX"
+
+
+def test_a_confirmed_move_stamps_the_destination_validity(db):
+    from src.services.write_service import Selection, _reflect_move
+
+    placement = MessagePlacement(email_log_id=100, folder="INBOX", uid=9, uid_validity=1)
+    db.add(placement)
+    db.commit()
+    message = db.get(EmailLog, 100)
+    selection = Selection(
+        account=db.get(SMTPConfig, 1), targets=[(message, placement)], matched=1, skipped=[]
+    )
+
+    _reflect_move(db, selection, "Archive", {"INBOX": {9: (77, 42)}})
+
+    landed = db.query(MessagePlacement).one()
+    assert (landed.folder, landed.uid, landed.uid_validity) == ("Archive", 77, 42)
+
+
+@pytest.mark.asyncio
+async def test_a_tombstoned_message_is_not_writable_even_by_id(db):
+    """It was tombstoned because the provider no longer has it."""
+    from datetime import datetime as dt
+
+    db.add(MessagePlacement(email_log_id=100, folder="INBOX", uid=9, uid_validity=1))
+    db.get(EmailLog, 100).deleted_at = dt(2026, 8, 1, tzinfo=timezone.utc)
+    db.commit()
+
+    with pytest.raises(HTTPException) as raised:
+        await mark_mail(db, _user(db), mark="read", email_ids=[100])
+
+    assert raised.value.status_code == 404

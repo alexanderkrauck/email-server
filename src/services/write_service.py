@@ -214,7 +214,15 @@ def _select(db: Session, user: User, email_ids: list[int] | None, filters: dict,
             )
         ids, matched = select_message_ids(db, user, limit=limit, **filters)
 
-    messages = owned_email_query(db, user.id).filter(EmailLog.id.in_(ids)).all() if ids else []
+    # deleted_at matters even for an explicit id list: a tombstoned message is one
+    # the provider no longer has, so there is nothing upstream to write to.
+    messages = (
+        owned_email_query(db, user.id)
+        .filter(EmailLog.id.in_(ids), EmailLog.deleted_at.is_(None))
+        .all()
+        if ids
+        else []
+    )
     found = {message.id for message in messages}
     skipped = [{"email_id": missing, "reason": "not found"} for missing in set(ids) - found]
 
@@ -442,23 +450,37 @@ async def move_mail(
 
 def _reflect_move(db: Session, selection: Selection, destination: str, landed: dict) -> dict:
     """Record a completed move locally, once the server has confirmed it."""
-    moved = unchanged = 0
+    moved = unchanged = unconfirmed = 0
     for source, group in selection.by_folder.items():
         if source == destination:
             unchanged += len(group)
             continue
         for message, placement in group:
-            new_uid = landed.get(source, {}).get(placement.uid)
-            validity = placement.uid_validity
+            confirmation = landed.get(source, {}).get(placement.uid)
+            if confirmation is None:
+                # The server did not say where it went, so the old location is
+                # still the best thing known. Deleting it would leave the message
+                # unplaced, and nothing re-places a message in a folder this
+                # account does not census -- Gmail's Bin, for one. The next census
+                # of the source folder retires it if the move did happen.
+                unconfirmed += 1
+                continue
+            new_uid, new_validity = confirmation
             db.delete(placement)
-            if new_uid is not None:
-                upsert_placement(db, message.id, destination, new_uid, validity)
-            # Otherwise leave it unplaced: only a message that has a placement can
-            # be judged missing, so an unplaced message is never tombstoned, and
-            # the next sync pass files it where it now lives.
+            # The validity from COPYUID belongs to the destination folder. Reusing
+            # the source folder's would stamp a UID from one numbering space with
+            # another's identifier, which reads as a renumbered folder for ever.
+            upsert_placement(db, message.id, destination, new_uid, new_validity)
             moved += 1
     db.commit()
-    return {"moved": moved, "already_there": unchanged}
+    result = {"moved": moved, "already_there": unchanged}
+    if unconfirmed:
+        result["unconfirmed"] = unconfirmed
+        result["note_unconfirmed"] = (
+            f"{unconfirmed} message(s) were moved but the server did not report the "
+            "new location, so the index still shows the old one until the next sync."
+        )
+    return result
 
 
 async def delete_mail(

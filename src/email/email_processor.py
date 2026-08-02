@@ -885,6 +885,12 @@ class EmailProcessor:
                     db.delete(message)
                 elif settings.upstream_delete_policy == "tombstone":
                     message.deleted_at = now
+                    # A tombstoned message has no location: the provider no longer
+                    # has it. The IMAP path retires placements before tombstoning;
+                    # this one has to do it explicitly or the two disagree.
+                    db.query(MessagePlacement).filter(
+                        MessagePlacement.email_log_id == message.id
+                    ).delete(synchronize_session=False)
             account.initial_sync_complete = True
             account.backfill_complete = True
             account.sync_page_token = None

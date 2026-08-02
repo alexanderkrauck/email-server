@@ -225,6 +225,15 @@ clearing 8,000 newsletters is one call rather than 8,000. Each response reports
 short, so a partial batch is never mistaken for a finished one. A call with
 neither ids nor filters is refused rather than treated as "the whole mailbox".
 
+**Gmail.** Gmail has labels, not folders, so a single location is projected from
+them by precedence — `TRASH > SPAM > DRAFT > INBOX > SENT`, and `ARCHIVE` for a
+message carrying none of those. That projection is what makes folder-scoped
+search, Trash exclusion and writes work identically across providers: a Gmail
+message is addressed by its provider id rather than a UID, and moving it means
+adding one label and removing the one it came from. `SENT` and `DRAFT` are
+Gmail's to assign and are never removed. Folder creation, renaming and deletion
+are refused there, with the reason.
+
 **Writes.** Every write goes to the mailbox first and is only recorded locally
 once the server confirms it, so the index never claims a change that did not
 happen. They hold the same lease the synchronizer uses, keyed on

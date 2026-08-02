@@ -414,7 +414,10 @@ def register_mcp_tools(mcp) -> None:
         name="move_mail",
         description=(
             "Move mail into another folder of the same mailbox. The folder must exist: "
-            "call list_mail_folders for exact names, or create_mail_folder first. " +
+            "call list_mail_folders for exact names, or create_mail_folder first. "
+            "Gmail accounts have labels rather than folders, so their locations are "
+            "fixed and exclusive: INBOX, ARCHIVE, SENT, DRAFT, SPAM, TRASH. ARCHIVE "
+            "there means removing a message from the Inbox without deleting it. " +
             SELECTION_DOC +
             "To delete, use delete_mail rather than moving to Trash by hand."
         ),
@@ -516,7 +519,9 @@ def register_mcp_tools(mcp) -> None:
         description=(
             "Create a folder in one mailbox, so mail can be filed somewhere that does "
             "not exist yet. Subscribes to it, so other mail clients show it too. "
-            "Returns created=false if a folder of that name was already there."
+            "Returns created=false if a folder of that name was already there. Not "
+            "available on Gmail accounts, which have labels and a fixed set of "
+            "locations."
         ),
         annotations=WRITE_EXTERNAL,
     )

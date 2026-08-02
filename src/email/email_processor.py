@@ -24,10 +24,29 @@ from src.services.message_metadata import content_fingerprint, participant_model
 logger = logging.getLogger(__name__)
 
 
-def upsert_placement(db, email_log_id: int, folder: str | None, uid: int | None, uid_validity: int | None) -> None:
-    """Record that a message is filed in a folder, replacing any earlier UID."""
+def upsert_placement(
+    db,
+    email_log_id: int,
+    folder: str | None,
+    uid: int | None,
+    uid_validity: int | None,
+    *,
+    exclusive: bool = False,
+) -> None:
+    """Record that a message is filed in a folder, replacing any earlier UID.
+
+    exclusive is for providers where a message has one location rather than
+    several. An IMAP message really can sit in INBOX and Trash at once; a Gmail
+    message cannot, and letting its old location survive a relabel would leave it
+    filed in both, counted twice, and addressable at whichever the ranking picked.
+    """
     if not folder:
         return
+    if exclusive:
+        db.query(MessagePlacement).filter(
+            MessagePlacement.email_log_id == email_log_id,
+            MessagePlacement.folder != folder,
+        ).delete(synchronize_session=False)
     placement = (
         db.query(MessagePlacement)
         .filter(MessagePlacement.email_log_id == email_log_id, MessagePlacement.folder == folder)
@@ -905,6 +924,12 @@ class EmailProcessor:
                 with get_db_session() as db:
                     smtp_config = db.query(SMTPConfig).filter(SMTPConfig.id == email_data["smtp_config_id"]).first()
                     storage_config = resolve_storage_config(smtp_config)
+                    # Gmail projects one location from labels; IMAP folders stack.
+                    exclusive = (
+                        smtp_config is not None
+                        and smtp_config.provider == "gmail"
+                        and smtp_config.auth_type == "oauth2"
+                    )
 
                     # Check if email already exists (upsert pattern)
                     existing_email = (
@@ -951,6 +976,7 @@ class EmailProcessor:
                             email_data.get("folder"),
                             email_data.get("imap_uid"),
                             email_data.get("uid_validity"),
+                            exclusive=exclusive,
                         )
                         logger.debug("Email already exists: %s", email_data["message_id"])
                         continue
@@ -995,6 +1021,7 @@ class EmailProcessor:
                             email_data.get("folder"),
                             email_data.get("imap_uid"),
                             email_data.get("uid_validity"),
+                            exclusive=exclusive,
                         )
                         logger.debug("Upgraded legacy provider reference for %s", email_data["message_id"])
                         continue
@@ -1047,6 +1074,7 @@ class EmailProcessor:
                         email_data.get("folder"),
                         email_data.get("imap_uid"),
                         email_data.get("uid_validity"),
+                        exclusive=exclusive,
                     )
                     db.add_all(participant_models(email_log.id, email_data))
 

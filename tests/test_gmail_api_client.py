@@ -50,7 +50,8 @@ async def test_get_parsed_message_uses_gmail_provider_ids(sample_raw_email):
 
     assert message["provider_message_id"] == "18fabc123"
     assert message["provider_thread_id"] == "thread-9"
-    assert message["folder"] == "gmail"
+    # Gmail has no folders; a location is projected from the labels.
+    assert message["folder"] == "INBOX"
     assert message["imap_uid"] is None
     assert json.loads(message["flags"]) == ["INBOX", "STARRED"]
     assert message["raw_email"] == sample_raw_email

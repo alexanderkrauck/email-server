@@ -11,10 +11,12 @@ so that no census is reading sequence numbers while the write lands.
 
 import asyncio
 import contextlib
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+import httpx
 from fastapi import HTTPException
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
@@ -26,6 +28,13 @@ from src.email.email_processor import (
     refresh_mailbox_lease,
     release_mailbox_lease,
     upsert_placement,
+)
+from src.email.gmail_labels import (
+    ARCHIVE,
+    LOCATIONS,
+    labels_for_move,
+    location_for,
+    parse_labels,
 )
 from src.email.imap_writer import (
     ImapWriteError,
@@ -81,12 +90,17 @@ def _rate_limit(user_id: int) -> None:
     _recent_writes[user_id] = recent
 
 
-def writable_placement(db: Session, message: EmailLog) -> MessagePlacement:
+def writable_placement(
+    db: Session, message: EmailLog, *, requires_uid: bool = True
+) -> MessagePlacement:
     """The copy of a message a write should address.
 
-    Prefer one that is addressable -- it has a UID -- and outside Trash, so that
-    marking a message read does not act on the deleted copy while the live one
-    keeps its old state.
+    Prefer one that is addressable and outside Trash, so that marking a message
+    read does not act on the deleted copy while the live one keeps its old state.
+
+    On IMAP, addressable means having a UID. Gmail messages have none -- they are
+    addressed by provider id, and the placement only records which location the
+    labels project to -- so requiring one there would refuse every write.
     """
     placements = (
         db.query(MessagePlacement).filter(MessagePlacement.email_log_id == message.id).all()
@@ -105,23 +119,18 @@ def writable_placement(db: Session, message: EmailLog) -> MessagePlacement:
     ranked = sorted(
         placements,
         key=lambda placement: (
-            placement.uid is None,
+            requires_uid and placement.uid is None,
             is_excluded_folder(placement.folder, suffixes),
             placement.folder or "",
         ),
     )
     best = ranked[0]
-    if best.uid is None:
+    if requires_uid and best.uid is None:
         raise HTTPException(status_code=409, detail="This message has no upstream UID to address")
     return best
 
 
 def _assert_writable(account: SMTPConfig) -> None:
-    if account.provider == "gmail" and account.auth_type == "oauth2":
-        raise HTTPException(
-            status_code=501,
-            detail="Gmail API accounts do not support writes yet",
-        )
     if not account.credential_ciphertext:
         raise HTTPException(status_code=400, detail="Mailbox password is not configured")
 
@@ -185,10 +194,11 @@ def _select(db: Session, user: User, email_ids: list[int] | None, filters: dict,
     account = db.query(SMTPConfig).filter(SMTPConfig.id == messages[0].smtp_config_id).one()
     _assert_writable(account)
 
+    requires_uid = not _is_gmail_api(account)
     targets = []
     for message in messages:
         try:
-            targets.append((message, writable_placement(db, message)))
+            targets.append((message, writable_placement(db, message, requires_uid=requires_uid)))
         except HTTPException as exc:
             skipped.append({"email_id": message.id, "reason": exc.detail})
     if not targets:
@@ -298,6 +308,19 @@ async def mark_mail(
     selection = _select(db, user, email_ids, filters, limit)
     add, remove = MARKS[mark]
 
+    if _is_gmail_api(selection.account):
+        # Gmail states the negative: a read message simply lacks UNREAD.
+        gmail = {
+            "read": ([], ["UNREAD"]),
+            "unread": (["UNREAD"], []),
+            "flagged": (["STARRED"], []),
+            "unflagged": ([], ["STARRED"]),
+        }[mark]
+        changed = await _gmail_relabel(
+            db, selection, add_for=lambda _labels: gmail[0], remove_for=lambda _labels: gmail[1]
+        )
+        return _outcome(selection, limit, mark=mark, confirmed=changed)
+
     async def operation(client):
         confirmed: dict[str, dict[int, str]] = {}
         for folder, group in selection.by_folder.items():
@@ -333,6 +356,25 @@ async def move_mail(
     """Move one message or a whole search result into another folder."""
     _rate_limit(user.id)
     selection = _select(db, user, email_ids, filters, limit)
+
+    if _is_gmail_api(selection.account):
+        destination = folder.upper()
+        if destination not in (*LOCATIONS, ARCHIVE):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{folder!r} is not a Gmail location. Gmail has labels, not folders: "
+                    f"use one of {', '.join((*LOCATIONS, ARCHIVE))}. ARCHIVE means "
+                    "removing the message from the Inbox without deleting it."
+                ),
+            )
+        changed = await _gmail_relabel(
+            db,
+            selection,
+            add_for=lambda labels: labels_for_move(labels, destination)[0],
+            remove_for=lambda labels: labels_for_move(labels, destination)[1],
+        )
+        return _outcome(selection, limit, to=destination, moved=changed, already_there=0)
 
     async def operation(client):
         names = {item["name"] for item in await list_folders(client)}
@@ -391,6 +433,48 @@ async def delete_mail(
     _rate_limit(user.id)
     selection = _select(db, user, email_ids, filters, limit)
     suffixes = settings.excluded_folder_suffixes
+
+    if _is_gmail_api(selection.account):
+        if not permanent:
+            changed = await _gmail_relabel(
+                db,
+                selection,
+                add_for=lambda labels: labels_for_move(labels, "TRASH")[0],
+                remove_for=lambda labels: labels_for_move(labels, "TRASH")[1],
+            )
+            return _outcome(selection, limit, permanent=False, to="TRASH", moved=changed)
+
+        outside = [
+            message.id
+            for message, placement in selection.targets
+            if not is_excluded_folder(placement.folder, suffixes)
+        ]
+        if outside:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"{len(outside)} of these messages are not in Gmail's Bin yet. Send "
+                    "them there first; only a message already in Trash can be removed "
+                    "permanently."
+                ),
+            )
+
+        async def destroy(client):
+            semaphore = asyncio.Semaphore(max(1, settings.gmail_request_concurrency))
+
+            async def one(message):
+                async with semaphore:
+                    await client.delete_message_permanently(message.provider_message_id)
+
+            await asyncio.gather(*(one(message) for message, _p in selection.targets))
+
+        await _gmail(db, selection.account, destroy)
+        now = datetime.now(tz=timezone.utc)
+        for message, placement in selection.targets:
+            db.delete(placement)
+            message.deleted_at = now
+        db.commit()
+        return _outcome(selection, limit, permanent=True)
 
     if permanent:
         outside = [
@@ -451,10 +535,30 @@ async def delete_mail(
     return _outcome(selection, limit, permanent=False, to=trash, **reflected)
 
 
+def _assert_folders_supported(account: SMTPConfig) -> None:
+    """Folder management is an IMAP idea.
+
+    Gmail has labels, and its locations here are projected rather than stored, so
+    there is nothing for create, rename or delete to act on. Refusing with the
+    reason is more useful than letting an IMAP connection fail against an account
+    that never had one.
+    """
+    if _is_gmail_api(account):
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                "This is a Gmail account, which has labels rather than folders. Its "
+                "locations are fixed: INBOX, ARCHIVE, SENT, DRAFT, SPAM, TRASH. Use "
+                "move_mail with one of those."
+            ),
+        )
+
+
 async def create_mail_folder(db: Session, user: User, *, account_id: int, name: str) -> dict:
     """Create a folder, so an agent can file mail somewhere that does not exist yet."""
     account = owned_account(db, user.id, account_id)
     _assert_writable(account)
+    _assert_folders_supported(account)
     cleaned = name.strip().strip('"')
     if not cleaned or any(ch in cleaned for ch in '"\r\n'):
         raise HTTPException(status_code=400, detail="Invalid folder name")
@@ -467,7 +571,15 @@ async def list_mail_folders(db: Session, user: User, *, account_id: int) -> dict
     """Every folder in one mailbox, so a move has real names to target."""
     account = owned_account(db, user.id, account_id)
     _assert_writable(account)
-    folders = await _with_mailbox(db, account, lambda client: list_folders(client))
+    if _is_gmail_api(account):
+        # Gmail's locations are projected, not listed: reporting its user labels
+        # here would offer move_mail destinations that move_mail cannot honour.
+        folders = [
+            {"name": name, "special_use": _GMAIL_ROLES.get(name)}
+            for name in (*LOCATIONS, ARCHIVE)
+        ]
+    else:
+        folders = await _with_mailbox(db, account, lambda client: list_folders(client))
     counts = dict(
         db.query(MessagePlacement.folder, func.count())
         .join(EmailLog, EmailLog.id == MessagePlacement.email_log_id)
@@ -505,7 +617,7 @@ async def save_draft(
     _assert_writable(account)
     _rate_limit(user.id)
 
-    headers = {}
+    headers: dict[str, str] = {}
     if reply_to_email_id is not None:
         parent = owned_email(db, user.id, reply_to_email_id)
         if parent.smtp_config_id != account_id:
@@ -529,6 +641,20 @@ async def save_draft(
         body_html=body_html,
         headers=headers,
     )
+
+    if _is_gmail_api(account):
+        thread_id = None
+        if reply_to_email_id is not None:
+            thread_id = owned_email(db, user.id, reply_to_email_id).provider_thread_id
+        created = await _gmail(
+            db, account, lambda client: client.create_draft(raw, thread_id=thread_id)
+        )
+        return {
+            "success": True,
+            "folder": "DRAFT",
+            "draft_id": (created or {}).get("id"),
+            "bytes": len(raw),
+        }
 
     async def operation(client):
         folders = await list_folders(client)
@@ -566,6 +692,7 @@ async def delete_mail_folder(
     """
     account = owned_account(db, user.id, account_id)
     _assert_writable(account)
+    _assert_folders_supported(account)
     _rate_limit(user.id)
 
     folders = await _with_mailbox(db, account, lambda client: list_folders(client))
@@ -629,6 +756,7 @@ async def rename_mail_folder(
     """Rename a folder, keeping the mail and any nested folders with it."""
     account = owned_account(db, user.id, account_id)
     _assert_writable(account)
+    _assert_folders_supported(account)
     cleaned = new_name.strip().strip('"')
     if not cleaned or any(character in cleaned for character in '"\r\n'):
         raise HTTPException(status_code=400, detail="Invalid folder name")
@@ -672,3 +800,101 @@ async def rename_mail_folder(
         "renamed_to": cleaned,
         "placements_updated": renamed,
     }
+
+
+_GMAIL_ROLES = {"TRASH": "trash", "SPAM": "junk", "DRAFT": "drafts", "SENT": "sent", "ARCHIVE": "archive"}
+
+
+def _is_gmail_api(account: SMTPConfig) -> bool:
+    return account.provider == "gmail" and account.auth_type == "oauth2"
+
+
+async def _gmail(db: Session, account: SMTPConfig, operation):
+    """Run an operation against the Gmail API under the mailbox lease.
+
+    The lease matters less here than on IMAP -- there are no sequence numbers to
+    renumber -- but the Gmail sync reconciles by history id, and a relabel landing
+    mid-pass is still a change the pass did not see.
+    """
+    from src.email.gmail_api_client import GmailApiClient
+
+    deadline = datetime.now(tz=timezone.utc) + timedelta(
+        seconds=settings.mail_write_lease_wait_seconds
+    )
+    while True:
+        token = acquire_mailbox_lease(db, account, seconds=settings.sync_lease_seconds)
+        if token or datetime.now(tz=timezone.utc) >= deadline:
+            break
+        await asyncio.sleep(1)
+    if not token:
+        raise HTTPException(
+            status_code=409,
+            detail="This mailbox has been synchronizing longer than this write would wait; retry shortly",
+        )
+
+    async def heartbeat() -> None:
+        while True:
+            await asyncio.sleep(max(1, settings.sync_lease_seconds // 3))
+            if not refresh_mailbox_lease(token, seconds=settings.sync_lease_seconds):
+                logger.warning("Lost the mailbox lease during a write on account %s", account.id)
+                return
+
+    keepalive = asyncio.create_task(heartbeat())
+    client = GmailApiClient(SMTPConfig.create_detached(account))
+    try:
+        return await operation(client)
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Gmail refused the change: {exc.response.status_code} {exc.response.text[:200]}",
+        ) from exc
+    finally:
+        keepalive.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await keepalive
+        with contextlib.suppress(Exception):
+            await client.close()
+        release_mailbox_lease(db, token)
+
+
+def _record_gmail_labels(db: Session, message: EmailLog, labels: list[str]) -> None:
+    """Write back what Gmail says the message now is, never what was asked for."""
+    apply_flag_state(message, json.dumps(sorted(labels)))
+    upsert_placement(db, message.id, location_for(labels), None, None, exclusive=True)
+
+
+async def _gmail_relabel(
+    db: Session,
+    selection: Selection,
+    *,
+    add_for,
+    remove_for,
+) -> int:
+    """Apply per-message label changes, bounded by the account's concurrency."""
+    semaphore = asyncio.Semaphore(max(1, settings.gmail_request_concurrency))
+
+    async def one(client, message: EmailLog) -> tuple[EmailLog, list[str] | None]:
+        labels = parse_labels(message.flags)
+        add, remove = add_for(labels), remove_for(labels)
+        if not add and not remove:
+            return message, labels
+        async with semaphore:
+            return message, await client.modify_labels(
+                message.provider_message_id, add=add, remove=remove
+            )
+
+    async def operation(client):
+        return await asyncio.gather(
+            *(one(client, message) for message, _placement in selection.targets)
+        )
+
+    results = await _gmail(db, selection.account, operation)
+    changed = 0
+    for message, labels in results:
+        if labels is None:
+            selection.skipped.append({"email_id": message.id, "reason": "Gmail did not confirm"})
+            continue
+        _record_gmail_labels(db, message, labels)
+        changed += 1
+    db.commit()
+    return changed

@@ -394,10 +394,16 @@ class SMTPClient:
                     provider_size is not None
                     and provider_size > settings.imap_max_message_size
                 )
+                # BODY.PEEK[], never RFC822: RFC 3501 defines RFC822 as an alias
+                # for BODY[], and a non-peek fetch sets \Seen on the server. Reading
+                # a mailbox in order to index it must not mark it read -- that
+                # destroyed the unread state of 47,410 messages across four accounts
+                # before anyone noticed, because every new message lost it within
+                # about thirty seconds of arriving.
                 fetch_items = (
                     "(UID FLAGS RFC822.SIZE BODY.PEEK[HEADER])"
                     if headers_only
-                    else "(UID FLAGS RFC822.SIZE RFC822)"
+                    else "(UID FLAGS RFC822.SIZE BODY.PEEK[])"
                 )
                 fetch_response = await self.client.fetch(msg_id, fetch_items)
                 if fetch_response.result == "OK":

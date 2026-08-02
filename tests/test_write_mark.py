@@ -251,3 +251,27 @@ def test_a_complete_batch_does_not_claim_truncation():
     selection = Selection(account=Config(id=1), targets=[(None, None)] * 3, matched=3, skipped=[])
 
     assert "truncated" not in _outcome(selection, None)
+
+
+def test_folders_the_mailbox_depends_on_are_protected():
+    from src.services.write_service import _protected_reason
+
+    assert _protected_reason({"name": "INBOX", "special_use": None})
+    assert _protected_reason({"name": "[Google Mail]/Bin", "special_use": "trash"})
+    assert _protected_reason({"name": "Sent", "special_use": "sent"})
+    assert _protected_reason({"name": "Rechnungen", "special_use": None}) is None
+
+
+def test_nested_folders_are_found_by_either_delimiter():
+    from src.email.imap_writer import child_folders
+
+    folders = [
+        {"name": "Projekte"},
+        {"name": "Projekte/2026"},
+        {"name": "INBOX.Projekte"},
+        {"name": "INBOX.Projekte.Alt"},
+        {"name": "Projekteering"},
+    ]
+
+    assert child_folders(folders, "Projekte") == ["Projekte/2026"]
+    assert child_folders(folders, "INBOX.Projekte") == ["INBOX.Projekte.Alt"]

@@ -49,9 +49,11 @@ from src.services.mail_service import (
 )
 from src.services.write_service import create_mail_folder as create_folder_in
 from src.services.write_service import delete_mail as delete_message
+from src.services.write_service import delete_mail_folder as delete_folder_in
 from src.services.write_service import list_mail_folders as load_folders
 from src.services.write_service import mark_mail as mark_message
 from src.services.write_service import move_mail as move_message_to
+from src.services.write_service import rename_mail_folder as rename_folder_in
 from src.services.write_service import save_draft as store_draft
 
 READ_ONLY = ToolAnnotations(
@@ -523,6 +525,39 @@ def register_mcp_tools(mcp) -> None:
         user = await current_mcp_user()
         with SessionLocal() as db:
             return await create_folder_in(db, user, account_id=account_id, name=name)
+
+    @mcp.tool(
+        name="delete_mail_folder",
+        description=(
+            "Remove a folder from one mailbox. Any mail still in it is moved to Trash "
+            "first, so deleting a folder never destroys messages. Refuses for INBOX and "
+            "for any folder the server declares as its Sent, Drafts, Trash, Spam or "
+            "Archive, refuses while it still contains nested folders, and refuses if "
+            "the server reports messages the index did not know about unless force=true."
+        ),
+        annotations=DESTRUCTIVE_EXTERNAL,
+    )
+    @mcp_error_boundary
+    async def delete_mail_folder(account_id: int, name: str, force: bool = False) -> dict:
+        user = await current_mcp_user()
+        with SessionLocal() as db:
+            return await delete_folder_in(db, user, account_id=account_id, name=name, force=force)
+
+    @mcp.tool(
+        name="rename_mail_folder",
+        description=(
+            "Rename a folder, keeping its mail and any nested folders with it. Refuses "
+            "for INBOX and for folders the server declares a special use for."
+        ),
+        annotations=WRITE_EXTERNAL,
+    )
+    @mcp_error_boundary
+    async def rename_mail_folder(account_id: int, name: str, new_name: str) -> dict:
+        user = await current_mcp_user()
+        with SessionLocal() as db:
+            return await rename_folder_in(
+                db, user, account_id=account_id, name=name, new_name=new_name
+            )
 
     @mcp.tool(
         name="save_draft",

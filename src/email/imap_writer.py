@@ -4,6 +4,7 @@ Kept apart from SMTPClient, which is a read path: everything here mutates a
 mailbox the user owns, so it fails loudly rather than falling back.
 """
 
+import contextlib
 import logging
 import re
 
@@ -222,3 +223,58 @@ async def list_folders(client) -> list[dict]:
         role = next((flag.lstrip("\\") for flag in flags if flag in SPECIAL_USE), None)
         folders.append({"name": name, "special_use": role})
     return folders
+
+
+async def folder_message_count(client, name: str) -> int:
+    """How many messages the server itself reports in a folder."""
+    selected = await client.client.select(f'"{name}"')
+    if selected.result != "OK":
+        raise ImapWriteError(f"cannot select {name}")
+    search = await client.client.search("ALL")
+    if search.result != "OK":
+        raise ImapWriteError(f"cannot count messages in {name}")
+    return len(
+        [
+            token
+            for line in search.lines
+            if isinstance(line, (bytes, bytearray))
+            for token in bytes(line).decode("ascii", errors="ignore").split()
+            if token.isdigit()
+        ]
+    )
+
+
+async def delete_folder(client, name: str) -> None:
+    """Remove a folder. The caller is responsible for emptying it first."""
+    # A folder cannot be deleted while it is selected on some servers.
+    with contextlib.suppress(Exception):
+        await client.client.close()
+    response = await client.client.delete(f'"{name}"')
+    if response.result != "OK":
+        detail = b" ".join(
+            bytes(line) for line in response.lines if isinstance(line, (bytes, bytearray))
+        )
+        raise ImapWriteError(f"DELETE {name} failed: {detail.decode('ascii', errors='ignore')}")
+
+
+async def rename_folder(client, name: str, new_name: str) -> None:
+    """Rename a folder, which also moves its children with it."""
+    with contextlib.suppress(Exception):
+        await client.client.close()
+    response = await client.client.rename(f'"{name}"', f'"{new_name}"')
+    if response.result != "OK":
+        detail = b" ".join(
+            bytes(line) for line in response.lines if isinstance(line, (bytes, bytearray))
+        )
+        raise ImapWriteError(f"RENAME {name} failed: {detail.decode('ascii', errors='ignore')}")
+    await client.client.subscribe(f'"{new_name}"')
+
+
+def child_folders(folders: list[dict], name: str) -> list[str]:
+    """Folders nested under this one, by either hierarchy delimiter."""
+    return [
+        folder["name"]
+        for folder in folders
+        if folder["name"] != name
+        and (folder["name"].startswith(f"{name}/") or folder["name"].startswith(f"{name}."))
+    ]

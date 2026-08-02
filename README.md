@@ -31,7 +31,7 @@ accounts. One string is blurred: a case number belonging to a real filing.</sub>
 | Attachments | Text extracted and indexed at sync time (PDF, DOCX, XLSX, PPTX, OCR) | Base64 into the model's context, or not at all |
 | Attachment binaries | Never stored; refetched through a 5-minute signed URL | Stored on disk or inlined |
 | Users | Multi-tenant, every row owner-scoped | Single user |
-| Tool surface | 16 tools, all annotated | Frequently 40+ |
+| Tool surface | 19 tools, all annotated | Frequently 40+ |
 
 The trade is honest: you run a database and a container. In exchange the model can
 actually answer questions about your mail history, and your mail never leaves your
@@ -188,7 +188,7 @@ Gmail OAuth consent flow; Zoho and generic IMAP use provider app passwords.
 
 ## MCP tools
 
-Sixteen tools, each annotated with read-only, destructive and open-world hints.
+Nineteen tools, each annotated with read-only, destructive and open-world hints.
 It is a mail client, not a search box: everything you can do in Thunderbird you
 can do here, over an index instead of a folder listing.
 
@@ -207,6 +207,8 @@ can do here, over an index instead of a folder listing.
 | `send_mail` | send or reply, with owned attachments |
 | `list_mail_folders` | folders of one mailbox, with declared roles and indexed counts |
 | `create_mail_folder` | create and subscribe to a folder |
+| `rename_mail_folder` | rename a folder, keeping its mail and children |
+| `delete_mail_folder` | remove a folder, emptying it into Trash first |
 | `mark_mail` | set or clear read and flagged state, in bulk |
 | `move_mail` | move mail to another folder, in bulk |
 | `delete_mail` | move to Trash, in bulk; `permanent` only from Trash |

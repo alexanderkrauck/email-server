@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from src.config import settings
@@ -30,9 +30,13 @@ from src.email.email_processor import (
 from src.email.imap_writer import (
     ImapWriteError,
     append_message,
+    child_folders,
     create_folder,
+    delete_folder,
+    folder_message_count,
     list_folders,
     move_messages,
+    rename_folder,
     store_flags,
 )
 from src.email.message_flags import apply_flag_state
@@ -515,3 +519,134 @@ async def save_draft(
 
     drafts, uid = await _with_mailbox(db, account, operation)
     return {"success": True, "folder": drafts, "uid": uid, "bytes": len(raw)}
+
+
+# Folders the mailbox itself relies on. INBOX is required by RFC 3501, and a
+# folder the server tagged with a special use is where it files sent mail,
+# drafts, spam or deletions.
+def _protected_reason(folder: dict) -> str | None:
+    if folder["name"].upper() == "INBOX":
+        return "INBOX cannot be removed"
+    if folder["special_use"]:
+        return f"this is the mailbox's {folder['special_use']} folder"
+    return None
+
+
+async def delete_mail_folder(
+    db: Session, user: User, *, account_id: int, name: str, force: bool = False
+) -> dict:
+    """Remove a folder, sending any mail still in it to Trash first.
+
+    Deleting a folder on an IMAP server destroys the messages inside it. So this
+    empties it into Trash first and only then removes it -- and refuses outright
+    if the server still reports messages afterwards, rather than taking the
+    server's word for what the index thinks it knows.
+    """
+    account = owned_account(db, user.id, account_id)
+    _assert_writable(account)
+    _rate_limit(user.id)
+
+    folders = await _with_mailbox(db, account, lambda client: list_folders(client))
+    target = next((folder for folder in folders if folder["name"] == name), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"No folder named {name!r} in this mailbox")
+    protected = _protected_reason(target)
+    if protected:
+        raise HTTPException(status_code=409, detail=f"Refusing to delete {name!r}: {protected}")
+    children = child_folders(folders, name)
+    if children:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{name!r} still contains the folder(s) {children}. Remove those first.",
+        )
+
+    # Empty it into Trash through the ordinary path, so placements and read state
+    # are updated the same way any other move updates them.
+    emptied = 0
+    if not is_excluded_folder(name, settings.excluded_folder_suffixes):
+        with contextlib.suppress(HTTPException):
+            moved = await delete_mail(db, user, account_id=account_id, folders=[name])
+            emptied = moved.get("moved", 0)
+
+    async def operation(client):
+        remaining = await folder_message_count(client, name)
+        if remaining and not force:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"{name!r} still holds {remaining} message(s) the index does not know "
+                    "about; deleting the folder would destroy them. Move them out, or "
+                    "pass force=true."
+                ),
+            )
+        await delete_folder(client, name)
+        return remaining
+
+    remaining = await _with_mailbox(db, account, operation)
+    # The folder is gone, so its placements name nowhere. Anything that lost its
+    # last placement stays unplaced, which is never treated as deleted.
+    db.query(MessagePlacement).filter(
+        MessagePlacement.folder == name,
+        MessagePlacement.email_log_id.in_(
+            db.query(EmailLog.id).filter(EmailLog.smtp_config_id == account_id)
+        ),
+    ).delete(synchronize_session=False)
+    db.commit()
+    return {
+        "success": True,
+        "account_id": account_id,
+        "deleted": name,
+        "moved_to_trash": emptied,
+        "destroyed": remaining,
+    }
+
+
+async def rename_mail_folder(
+    db: Session, user: User, *, account_id: int, name: str, new_name: str
+) -> dict:
+    """Rename a folder, keeping the mail and any nested folders with it."""
+    account = owned_account(db, user.id, account_id)
+    _assert_writable(account)
+    cleaned = new_name.strip().strip('"')
+    if not cleaned or any(character in cleaned for character in '"\r\n'):
+        raise HTTPException(status_code=400, detail="Invalid folder name")
+    _rate_limit(user.id)
+
+    folders = await _with_mailbox(db, account, lambda client: list_folders(client))
+    target = next((folder for folder in folders if folder["name"] == name), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"No folder named {name!r} in this mailbox")
+    protected = _protected_reason(target)
+    if protected:
+        raise HTTPException(status_code=409, detail=f"Refusing to rename {name!r}: {protected}")
+    if any(folder["name"] == cleaned for folder in folders):
+        raise HTTPException(status_code=409, detail=f"A folder named {cleaned!r} already exists")
+
+    await _with_mailbox(db, account, lambda client: rename_folder(client, name, cleaned))
+
+    # RENAME carries nested folders too, so every placement beneath the old name
+    # has to follow, not just the ones directly in it.
+    owned = db.query(EmailLog.id).filter(EmailLog.smtp_config_id == account_id)
+    renamed = 0
+    for placement in (
+        db.query(MessagePlacement)
+        .filter(MessagePlacement.email_log_id.in_(owned))
+        .filter(
+            or_(
+                MessagePlacement.folder == name,
+                MessagePlacement.folder.startswith(f"{name}/"),
+                MessagePlacement.folder.startswith(f"{name}."),
+            )
+        )
+        .all()
+    ):
+        placement.folder = cleaned + placement.folder[len(name) :]
+        renamed += 1
+    db.commit()
+    return {
+        "success": True,
+        "account_id": account_id,
+        "renamed_from": name,
+        "renamed_to": cleaned,
+        "placements_updated": renamed,
+    }

@@ -350,6 +350,36 @@ def _flag_state_warning(scope_query, requested: dict[str, bool | None]) -> dict[
     }
 
 
+def _folder_scope_warning(db: Session, scope_query, folders, exclude_folders) -> dict[str, str] | None:
+    """Report messages a folder filter could not judge either way.
+
+    A message stored before folders were tracked has no placement at all. It is
+    deliberately kept by _apply_folder_scope, because absence of a placement is
+    not evidence of being in Trash -- but that means a folders= scope silently
+    excludes it, and an exclude_folders= scope silently keeps it.
+    """
+    if not folders and exclude_folders == []:
+        return None
+    unplaced = (
+        scope_query.filter(~EmailLog.id.in_(select(MessagePlacement.email_log_id)))
+        .order_by(None)
+        .count()
+    )
+    if not unplaced:
+        return None
+    if folders:
+        effect = "were excluded from this folder scope"
+    else:
+        effect = "were kept, because there is no evidence they are in an excluded folder"
+    return {
+        "code": "FOLDER_UNKNOWN",
+        "message": (
+            f"{unplaced} message(s) matching the other filters have no known folder and {effect}. "
+            "They were stored before this server tracked folders."
+        ),
+    }
+
+
 def _apply_common_filters(
     query,
     *,
@@ -680,6 +710,7 @@ def search_mail(
         participant=None,
         has_attachments=has_attachments,
     )
+    folder_warning = _folder_scope_warning(db, q, folders, exclude_folders)
     q = _apply_folder_scope(db, q, folders, exclude_folders)
     participant_condition = _participant_filter(participant_terms)
     if participant_condition is not None:
@@ -878,6 +909,8 @@ def search_mail(
         .all()
     )
     coverage, warnings = _account_coverage(db, user, account_id)
+    if folder_warning:
+        warnings.append(folder_warning)
     if flag_warning:
         warnings.append(flag_warning)
     return {
@@ -952,6 +985,7 @@ def search_mail_regex(
         participant=None,
         has_attachments=False,
     )
+    folder_warning = _folder_scope_warning(db, q, folders, exclude_folders)
     q = _apply_folder_scope(db, q, folders, exclude_folders)
     columns = {
         "sender": EmailLog.sender,
@@ -1169,6 +1203,8 @@ def search_mail_regex(
             last.id,
         )
     coverage, warnings = _account_coverage(db, user, account_id)
+    if folder_warning:
+        warnings.append(folder_warning)
     if flag_warning:
         warnings.append(flag_warning)
     return {

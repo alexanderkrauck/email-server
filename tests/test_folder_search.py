@@ -141,3 +141,27 @@ def test_folder_matching_is_by_suffix_not_exact_name():
     assert not is_excluded_folder("INBOX", suffixes)
     assert not is_excluded_folder("INBOX.Projekte.Trashcan-Design", suffixes)
     assert not is_excluded_folder(None, suffixes)
+
+
+def _codes(page):
+    return {warning["code"] for warning in page["warnings"]}
+
+
+def test_a_folder_scope_warns_about_messages_with_no_known_folder(db):
+    page = search_mail(db, _user(db), folders=["INBOX"], deduplicate="none")
+
+    assert "FOLDER_UNKNOWN" in _codes(page)
+    assert "<unplaced@x>" not in _ids(page)
+
+
+def test_the_default_scope_warns_that_unplaced_mail_was_kept(db):
+    page = search_mail(db, _user(db), deduplicate="none")
+
+    assert "FOLDER_UNKNOWN" in _codes(page)
+    assert "<unplaced@x>" in _ids(page)
+
+
+def test_no_folder_warning_when_folder_filtering_is_switched_off(db):
+    assert "FOLDER_UNKNOWN" not in _codes(
+        search_mail(db, _user(db), exclude_folders=[], deduplicate="none")
+    )

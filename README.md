@@ -26,11 +26,12 @@ accounts. One string is blurred: a case number belonging to a real filing.</sub>
 | Transport | Remote HTTP endpoint | Local stdio process on your machine |
 | Setup on the client | Paste a URL | Install a runtime, edit config JSON, store credentials locally |
 | Search | Own PostgreSQL index, GIN full-text, stemmed across languages | Live IMAP `SEARCH` per call |
+| Writing | Move, mark, delete, draft — confirmed by the server before the index records it | Read-only, or unguarded |
 | Result completeness | Exact `total_count`, signed cursors, per-account coverage | Whatever the folder returned |
 | Attachments | Text extracted and indexed at sync time (PDF, DOCX, XLSX, PPTX, OCR) | Base64 into the model's context, or not at all |
 | Attachment binaries | Never stored; refetched through a 5-minute signed URL | Stored on disk or inlined |
 | Users | Multi-tenant, every row owner-scoped | Single user |
-| Tool surface | 11 tools, all annotated | Frequently 40+ |
+| Tool surface | 16 tools, all annotated | Frequently 40+ |
 
 The trade is honest: you run a database and a container. In exchange the model can
 actually answer questions about your mail history, and your mail never leaves your
@@ -187,7 +188,9 @@ Gmail OAuth consent flow; Zoho and generic IMAP use provider app passwords.
 
 ## MCP tools
 
-Eleven tools, each annotated with read-only, destructive and open-world hints.
+Sixteen tools, each annotated with read-only, destructive and open-world hints.
+It is a mail client, not a search box: everything you can do in Thunderbird you
+can do here, over an index instead of a folder listing.
 
 | Tool | |
 |---|---|
@@ -202,9 +205,23 @@ Eleven tools, each annotated with read-only, destructive and open-world hints.
 | `get_thread` | reconstructed thread with confidence |
 | `get_attachment` | metadata, extracted text, expiring download URL |
 | `send_mail` | send or reply, with owned attachments |
+| `list_mail_folders` | folders of one mailbox, with declared roles and indexed counts |
+| `mark_mail` | set or clear read and flagged state |
+| `move_mail` | move a message to another folder |
+| `delete_mail` | move to Trash; `permanent` only from Trash |
+| `save_draft` | write a draft into the mailbox's Drafts folder |
 
-Deletion, standalone connection tests, and manual sync are deliberately outside the
-MCP surface.
+Standalone connection tests and manual sync are deliberately outside the MCP
+surface.
+
+**Writes.** Every write goes to the mailbox first and is only recorded locally
+once the server confirms it, so the index never claims a change that did not
+happen. They hold the same lease the synchronizer uses, keyed on
+`(host, port, username)` rather than on an account row, because two accounts can
+name one physical mailbox and an untagged `EXPUNGE` landing during a folder
+census renumbers the sequence numbers that census is reading. Writes address the
+live copy of a message rather than one sitting in Trash. `delete_mail` moves to
+Trash and needs a second, explicit call to destroy anything.
 
 **Passwords.** `add_mail_account` and `update_mail_account` take an optional
 write-only password. When a client will not transmit secrets, omit it and open the

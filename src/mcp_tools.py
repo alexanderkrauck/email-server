@@ -47,7 +47,11 @@ from src.services.mail_service import (
 from src.services.mail_service import (
     send_mail as send_message,
 )
+from src.services.write_service import delete_mail as delete_message
+from src.services.write_service import list_mail_folders as load_folders
 from src.services.write_service import mark_mail as mark_message
+from src.services.write_service import move_mail as move_message_to
+from src.services.write_service import save_draft as store_draft
 
 READ_ONLY = ToolAnnotations(
     readOnlyHint=True,
@@ -64,6 +68,14 @@ READ_EXTERNAL = ToolAnnotations(
 WRITE_EXTERNAL = ToolAnnotations(
     readOnlyHint=False,
     destructiveHint=False,
+    idempotentHint=False,
+    openWorldHint=True,
+)
+
+
+DESTRUCTIVE_EXTERNAL = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=True,
     idempotentHint=False,
     openWorldHint=True,
 )
@@ -343,6 +355,88 @@ def register_mcp_tools(mcp) -> None:
         user = await current_mcp_user()
         with SessionLocal() as db:
             return await mark_message(db, user, email_id=email_id, mark=mark)
+
+    @mcp.tool(
+        name="list_mail_folders",
+        description=(
+            "List the folders of one mailbox, with the role the server declares for "
+            "each (inbox, sent, drafts, trash, junk, archive) and how many indexed "
+            "messages are filed there. Call this before move_mail: folder names are "
+            "server-specific, and INBOX.Trash, [Google Mail]/Trash and Deleted "
+            "Messages are all real names for the same idea."
+        ),
+        annotations=READ_EXTERNAL,
+    )
+    @mcp_error_boundary
+    async def list_mail_folders(account_id: int) -> dict:
+        user = await current_mcp_user()
+        with SessionLocal() as db:
+            return await load_folders(db, user, account_id=account_id)
+
+    @mcp.tool(
+        name="move_mail",
+        description=(
+            "Move one message to another folder in the same mailbox. The folder must "
+            "already exist; use list_mail_folders to get its exact name. Acts on the "
+            "live copy, not on a copy in Trash. To delete, use delete_mail instead of "
+            "moving to Trash by hand."
+        ),
+        annotations=WRITE_EXTERNAL,
+    )
+    @mcp_error_boundary
+    async def move_mail(email_id: int, folder: str) -> dict:
+        user = await current_mcp_user()
+        with SessionLocal() as db:
+            return await move_message_to(db, user, email_id=email_id, folder=folder)
+
+    @mcp.tool(
+        name="delete_mail",
+        description=(
+            "Move one message to Trash. This is reversible: the message stays in the "
+            "mailbox and in the index, filed under Trash, and search excludes Trash by "
+            "default. permanent=true removes it outright and is only allowed for a "
+            "message already in Trash, so deleting always takes two deliberate steps."
+        ),
+        annotations=DESTRUCTIVE_EXTERNAL,
+    )
+    @mcp_error_boundary
+    async def delete_mail(email_id: int, permanent: bool = False) -> dict:
+        user = await current_mcp_user()
+        with SessionLocal() as db:
+            return await delete_message(db, user, email_id=email_id, permanent=permanent)
+
+    @mcp.tool(
+        name="save_draft",
+        description=(
+            "Write a draft into the mailbox's Drafts folder, where any mail client "
+            "will find it. Nothing is sent. Pass reply_to_email_id to thread the draft "
+            "onto an existing message. Use send_mail to actually send."
+        ),
+        annotations=WRITE_EXTERNAL,
+    )
+    @mcp_error_boundary
+    async def save_draft(
+        account_id: int,
+        to_addresses: list[str],
+        subject: str,
+        body_text: str = "",
+        body_html: str = "",
+        cc_addresses: list[str] | None = None,
+        reply_to_email_id: int | None = None,
+    ) -> dict:
+        user = await current_mcp_user()
+        with SessionLocal() as db:
+            return await store_draft(
+                db,
+                user,
+                account_id=account_id,
+                to_addresses=to_addresses,
+                subject=subject,
+                body_text=body_text,
+                body_html=body_html,
+                cc_addresses=cc_addresses,
+                reply_to_email_id=reply_to_email_id,
+            )
 
     @mcp.tool(
         name="search_mail_regex",

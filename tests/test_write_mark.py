@@ -101,28 +101,27 @@ def test_a_message_with_no_placement_cannot_be_written(db):
 
 
 @pytest.mark.asyncio
-async def test_writes_are_refused_unless_the_operator_enabled_them(db, monkeypatch):
-    monkeypatch.setattr(settings, "mail_write_enabled", False)
+async def test_another_owners_message_is_not_writable(db):
+    """Ownership is proven before a mailbox is ever opened."""
     db.add(MessagePlacement(email_log_id=100, folder="INBOX", uid=9, uid_validity=1))
     db.commit()
+    other = db.query(User).filter(User.id == 2).one()
 
     with pytest.raises(HTTPException) as raised:
-        await mark_mail(db, _user(db), email_id=100, mark="read")
+        await mark_mail(db, other, email_id=100, mark="read")
 
-    assert raised.value.status_code == 403
+    assert raised.value.status_code == 404
 
 
 @pytest.mark.asyncio
-async def test_an_unknown_mark_is_rejected_before_anything_is_opened(db, monkeypatch):
-    monkeypatch.setattr(settings, "mail_write_enabled", True)
-
+async def test_an_unknown_mark_is_rejected_before_anything_is_opened(db):
     with pytest.raises(HTTPException):
         await mark_mail(db, _user(db), email_id=100, mark="archived")
 
 
 @pytest.mark.asyncio
 async def test_a_write_refuses_while_the_mailbox_is_being_synchronised(db, monkeypatch):
-    monkeypatch.setattr(settings, "mail_write_enabled", True)
+    monkeypatch.setattr(settings, "mail_write_lease_wait_seconds", 0.0)
     db.add(MessagePlacement(email_log_id=100, folder="INBOX", uid=9, uid_validity=1))
     db.commit()
     held = acquire_mailbox_lease(db, db.get(SMTPConfig, 1), seconds=60)

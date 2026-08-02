@@ -250,4 +250,4 @@ def test_a_complete_batch_does_not_claim_truncation():
 
     selection = Selection(account=Config(id=1), targets=[(None, None)] * 3, matched=3, skipped=[])
 
-    assert "truncated" not in _outcome(selection, 500)
+    assert "truncated" not in _outcome(selection, None)

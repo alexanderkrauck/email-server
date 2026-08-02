@@ -98,6 +98,21 @@ def acquire_mailbox_lease(db, account: SMTPConfig, *, seconds: int) -> str | Non
     return token
 
 
+def refresh_mailbox_lease(token: str, *, seconds: int) -> bool:
+    """Extend a held mailbox lease. Uses its own session so it can run concurrently."""
+    now = datetime.now(tz=timezone.utc)
+    with SessionLocal.begin() as db:
+        updated = (
+            db.query(SMTPConfig)
+            .filter(SMTPConfig.sync_lock_token == token)
+            .update(
+                {SMTPConfig.sync_lock_expires_at: now + timedelta(seconds=seconds)},
+                synchronize_session=False,
+            )
+        )
+    return bool(updated)
+
+
 def release_mailbox_lease(db, token: str) -> None:
     db.query(SMTPConfig).filter(SMTPConfig.sync_lock_token == token).update(
         {

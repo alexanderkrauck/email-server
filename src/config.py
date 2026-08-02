@@ -141,11 +141,18 @@ class Settings(BaseSettings):
     # tombstones instead of destruction -- not in a switch.
     max_writes_per_minute: int = 30
     # Messages one write call may touch. Bulk triage is the point -- an inbox with
-    # 8,000 newsletters cannot be cleaned one tool call at a time -- but an
-    # unbounded call would let a single mistake move an entire mailbox.
-    max_write_batch: int = 2_000
-    # How long a write waits for a sync pass to release the mailbox before giving up.
-    mail_write_lease_wait_seconds: float = 20.0
+    # 8,000 newsletters cannot be cleaned one tool call at a time -- so this is a
+    # backstop against a runaway selection, not a pace-setter. Commands are
+    # chunked and the lease is refreshed, so a large batch is still one connection.
+    max_write_batch: int = 25_000
+    # UIDs per IMAP command. Servers cap a command line at a few kilobytes, and
+    # arbitrary UIDs cost about seven bytes each; chunking here keeps one bulk
+    # operation on one connection under one lease.
+    imap_uid_set_chunk: int = 500
+    # How long a write waits for a sync pass to release the mailbox before giving
+    # up. A pass over a large account outlasts a few seconds, and failing a write
+    # the caller would only retry itself is worse than waiting.
+    mail_write_lease_wait_seconds: float = 90.0
 
     # Logging
     log_level: str = "INFO"

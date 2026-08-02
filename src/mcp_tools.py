@@ -111,7 +111,7 @@ def _password_setup_details(user_id: int, account) -> dict:
 
 
 SELECTION_DOC = (
-    'Selects messages the same way search_mail does: pass email_ids for specific messages, or the same filters (query, participants, folders, date_from/to, is_unread, has_attachments) to act on everything that matches. One call, one connection, one command per folder -- triaging thousands of newsletters does not mean thousands of tool calls. The response reports how many matched versus how many were affected, so a truncated batch is never mistaken for a finished one; repeat the same call to continue. '
+    'Selects messages the same way search_mail does: pass email_ids for specific messages, or the same filters (query, participants, folders, date_from/to, is_unread, has_attachments) to act on everything that matches. One call, one connection, one command per folder -- triaging thousands of newsletters does not mean thousands of tool calls. The response reports how many matched versus how many were affected, so a truncated batch is never mistaken for a finished one; repeat the same call to continue. limit defaults to everything that matched. '
 )
 
 
@@ -367,7 +367,7 @@ def register_mcp_tools(mcp) -> None:
         has_attachments: bool = False,
         search_attachments: bool = False,
         match: Literal["stemmed", "exact"] = "stemmed",
-        limit: int = 500,
+        limit: int | None = None,
     ) -> dict:
         user = await current_mcp_user()
         with SessionLocal() as db:
@@ -434,7 +434,7 @@ def register_mcp_tools(mcp) -> None:
         has_attachments: bool = False,
         search_attachments: bool = False,
         match: Literal["stemmed", "exact"] = "stemmed",
-        limit: int = 500,
+        limit: int | None = None,
     ) -> dict:
         user = await current_mcp_user()
         with SessionLocal() as db:
@@ -485,7 +485,7 @@ def register_mcp_tools(mcp) -> None:
         has_attachments: bool = False,
         search_attachments: bool = False,
         match: Literal["stemmed", "exact"] = "stemmed",
-        limit: int = 500,
+        limit: int | None = None,
     ) -> dict:
         user = await current_mcp_user()
         with SessionLocal() as db:

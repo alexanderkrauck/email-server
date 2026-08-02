@@ -23,6 +23,19 @@ COPYUID = re.compile(rb"\[COPYUID\s+(\d+)\s+([\d,:]+)\s+([\d,:]+)\]", re.IGNOREC
 SPECIAL_USE = ("\\all", "\\archive", "\\drafts", "\\flagged", "\\junk", "\\sent", "\\trash")
 
 
+def uid_chunks(uids: list[int]) -> list[list[int]]:
+    """Split a UID list into sequence sets a server will actually accept.
+
+    Many servers cap a command line at a few kilobytes, and 4,000 arbitrary UIDs
+    is roughly 30 KB. Chunking here rather than in the caller means a bulk
+    operation stays one connection and one lease, not one call per chunk.
+    """
+    from src.config import settings
+
+    size = max(1, settings.imap_uid_set_chunk)
+    return [uids[start : start + size] for start in range(0, len(uids), size)]
+
+
 class ImapWriteError(RuntimeError):
     """The server refused, or could not be shown to have applied, a write."""
 
@@ -65,16 +78,17 @@ async def store_flags(client, folder: str, uids: list[int], *, add: list[str], r
         raise ImapWriteError(f"cannot select {folder}")
 
     confirmed: dict[int, str] = {}
-    sequence = ",".join(str(uid) for uid in uids)
-    for operation, flags in (("+FLAGS", add), ("-FLAGS", remove)):
-        if not flags:
-            continue
-        # Not .SILENT: the untagged FETCH it suppresses is the only evidence the
-        # write landed.
-        response = await client.client.uid("store", sequence, operation, f"({' '.join(flags)})")
-        if response.result != "OK":
-            raise ImapWriteError(f"{operation} failed in {folder}: {response.result}")
-        confirmed.update(parse_store_response(response.lines))
+    for chunk in uid_chunks(uids):
+        sequence = ",".join(str(uid) for uid in chunk)
+        for operation, flags in (("+FLAGS", add), ("-FLAGS", remove)):
+            if not flags:
+                continue
+            # Not .SILENT: the untagged FETCH it suppresses is the only evidence
+            # the write landed.
+            response = await client.client.uid("store", sequence, operation, f"({' '.join(flags)})")
+            if response.result != "OK":
+                raise ImapWriteError(f"{operation} failed in {folder}: {response.result}")
+            confirmed.update(parse_store_response(response.lines))
 
     missing = set(uids) - set(confirmed)
     if missing:
@@ -130,32 +144,35 @@ async def move_messages(client, source: str, uids: list[int], destination: str) 
     selected = await client.client.select(f'"{source}"')
     if selected.result != "OK":
         raise ImapWriteError(f"cannot select {source}")
-    sequence = ",".join(str(uid) for uid in uids)
 
     capabilities = {item.upper() for item in getattr(client.client.protocol, "capabilities", set())}
-    if "MOVE" in capabilities:
-        response = await client.client.uid("move", sequence, f'"{destination}"')
+    landed: dict[int, int] = {}
+    for chunk in uid_chunks(uids):
+        sequence = ",".join(str(uid) for uid in chunk)
+        if "MOVE" in capabilities:
+            response = await client.client.uid("move", sequence, f'"{destination}"')
+            if response.result != "OK":
+                raise ImapWriteError(f"MOVE to {destination} failed: {response.result}")
+            landed.update(parse_copyuid(response.lines))
+            continue
+
+        response = await client.client.uid("copy", sequence, f'"{destination}"')
         if response.result != "OK":
-            raise ImapWriteError(f"MOVE to {destination} failed: {response.result}")
-        return parse_copyuid(response.lines)
+            raise ImapWriteError(f"COPY to {destination} failed: {response.result}")
+        landed.update(parse_copyuid(response.lines))
 
-    response = await client.client.uid("copy", sequence, f'"{destination}"')
-    if response.result != "OK":
-        raise ImapWriteError(f"COPY to {destination} failed: {response.result}")
-    landed = parse_copyuid(response.lines)
-
-    marked = await client.client.uid("store", sequence, "+FLAGS", "(\\Deleted)")
-    if marked.result != "OK":
-        raise ImapWriteError(f"could not mark the originals deleted in {source}")
-    if "UIDPLUS" in capabilities:
-        await client.client.uid("expunge", sequence)
-    else:
-        logger.info(
-            "No UIDPLUS on this server; leaving %d original(s) in %s flagged "
-            "\\Deleted rather than expunging the whole folder",
-            len(uids),
-            source,
-        )
+        marked = await client.client.uid("store", sequence, "+FLAGS", "(\\Deleted)")
+        if marked.result != "OK":
+            raise ImapWriteError(f"could not mark the originals deleted in {source}")
+        if "UIDPLUS" in capabilities:
+            await client.client.uid("expunge", sequence)
+        else:
+            logger.info(
+                "No UIDPLUS on this server; leaving %d original(s) in %s flagged "
+                "\\Deleted rather than expunging the whole folder",
+                len(chunk),
+                source,
+            )
     return landed
 
 

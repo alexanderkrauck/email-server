@@ -10,6 +10,7 @@ so that no census is reading sequence numbers while the write lands.
 """
 
 import asyncio
+import contextlib
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -22,6 +23,7 @@ from src.config import settings
 from src.email.draft_builder import build_draft
 from src.email.email_processor import (
     acquire_mailbox_lease,
+    refresh_mailbox_lease,
     release_mailbox_lease,
     upsert_placement,
 )
@@ -138,9 +140,14 @@ class Selection:
         return grouped
 
 
-def _select(db: Session, user: User, email_ids: list[int] | None, filters: dict, limit: int) -> Selection:
-    """Resolve either an explicit id list or a search into addressable messages."""
-    limit = max(1, min(limit, settings.max_write_batch))
+def _select(db: Session, user: User, email_ids: list[int] | None, filters: dict, limit: int | None) -> Selection:
+    """Resolve either an explicit id list or a search into addressable messages.
+
+    limit=None means everything that matched, capped by max_write_batch. The cap
+    is a backstop against a runaway selection, not a page size: commands are
+    chunked and the lease is refreshed, so a large batch is still one connection.
+    """
+    limit = settings.max_write_batch if limit is None else max(1, min(limit, settings.max_write_batch))
     if email_ids:
         ids, matched = list(dict.fromkeys(email_ids))[:limit], len(set(email_ids))
     else:
@@ -184,7 +191,7 @@ def _select(db: Session, user: User, email_ids: list[int] | None, filters: dict,
     return Selection(account=account, targets=targets, matched=matched, skipped=skipped)
 
 
-def _outcome(selection: Selection, limit: int, **extra) -> dict:
+def _outcome(selection: Selection, limit: int | None, **extra) -> dict:
     result = {
         "success": True,
         "account_id": selection.account.id,
@@ -196,8 +203,9 @@ def _outcome(selection: Selection, limit: int, **extra) -> dict:
     if selection.matched > len(selection.targets) + len(selection.skipped):
         result["truncated"] = True
         result["note"] = (
-            f"{selection.matched} messages matched but this call was limited to {limit}. "
-            "Repeat with the same filters to continue."
+            f"{selection.matched} messages matched but this call handled "
+            f"{len(selection.targets) + len(selection.skipped)}. Repeat with the same "
+            "filters to continue."
         )
     return result
 
@@ -217,6 +225,16 @@ async def _with_mailbox(db: Session, account: SMTPConfig, operation):
             status_code=409,
             detail="This mailbox has been synchronizing longer than this write would wait; retry shortly",
         )
+    # Moving thousands of messages outruns a 120 second lease, and an expired
+    # lease lets a folder census start while UIDs are still being renumbered.
+    async def heartbeat() -> None:
+        while True:
+            await asyncio.sleep(max(1, settings.sync_lease_seconds // 3))
+            if not refresh_mailbox_lease(token, seconds=settings.sync_lease_seconds):
+                logger.warning("Lost the mailbox lease during a write on account %s", account.id)
+                return
+
+    keepalive = asyncio.create_task(heartbeat())
     client = SMTPClient(SMTPConfig.create_detached(account))
     try:
         if not await client.connect():
@@ -226,6 +244,9 @@ async def _with_mailbox(db: Session, account: SMTPConfig, operation):
         except ImapWriteError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
     finally:
+        keepalive.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await keepalive
         # A cancelled aioimaplib command leaves pending_sync_command set, and every
         # later command on that connection -- including logout -- waits on it forever.
         try:
@@ -241,7 +262,7 @@ async def mark_mail(
     *,
     mark: str,
     email_ids: list[int] | None = None,
-    limit: int = 500,
+    limit: int | None = None,
     **filters,
 ) -> dict:
     """Set or clear a flag on one message or on everything matching a search."""
@@ -280,7 +301,7 @@ async def move_mail(
     *,
     folder: str,
     email_ids: list[int] | None = None,
-    limit: int = 500,
+    limit: int | None = None,
     **filters,
 ) -> dict:
     """Move one message or a whole search result into another folder."""
@@ -333,7 +354,7 @@ async def delete_mail(
     *,
     permanent: bool = False,
     email_ids: list[int] | None = None,
-    limit: int = 500,
+    limit: int | None = None,
     **filters,
 ) -> dict:
     """Move to Trash, or destroy messages already in Trash.

@@ -86,55 +86,91 @@ async def store_flags(client, folder: str, uids: list[int], *, add: list[str], r
     return confirmed
 
 
-def parse_copyuid(lines) -> int | None:
-    """The destination UID a MOVE or COPY reported, when the server supports UIDPLUS."""
+def expand_uid_set(value: str) -> list[int]:
+    """Expand an IMAP sequence set such as "3,7:9" into [3, 7, 8, 9]."""
+    uids: list[int] = []
+    for part in value.split(","):
+        if ":" in part:
+            low, _, high = part.partition(":")
+            if low.isdigit() and high.isdigit():
+                start, end = sorted((int(low), int(high)))
+                uids.extend(range(start, end + 1))
+        elif part.isdigit():
+            uids.append(int(part))
+    return uids
+
+
+def parse_copyuid(lines) -> dict[int, int]:
+    """Map each source UID to where it landed, from the COPYUID response.
+
+    RFC 4315 guarantees the two sets correspond position by position, so this has
+    to zip them rather than take the first: a batched move of twenty messages
+    would otherwise record one destination UID for all twenty.
+    """
     for line in lines:
         if not isinstance(line, (bytes, bytearray)):
             continue
         match = COPYUID.search(bytes(line))
         if match:
-            destination = match.group(3).decode("ascii", errors="ignore")
-            # A single message, so the set is one UID; take the first regardless.
-            first = destination.replace(":", ",").split(",")[0]
-            return int(first) if first.isdigit() else None
-    return None
+            source = expand_uid_set(match.group(2).decode("ascii", errors="ignore"))
+            destination = expand_uid_set(match.group(3).decode("ascii", errors="ignore"))
+            return dict(zip(source, destination, strict=False))
+    return {}
 
 
-async def move_message(client, source: str, uid: int, destination: str) -> int | None:
-    """Move one message between folders. Returns the new UID when the server says.
+async def move_messages(client, source: str, uids: list[int], destination: str) -> dict[int, int]:
+    """Move messages between folders in one command. Returns source UID -> new UID.
 
-    Prefers UID MOVE (RFC 6851). The COPY/STORE/EXPUNGE fallback deliberately does
-    not EXPUNGE unless the server supports UID EXPUNGE: a bare EXPUNGE removes
-    every \\Deleted message in the mailbox, including ones this call never touched.
+    Prefers UID MOVE (RFC 6851). The COPY/STORE fallback deliberately does not
+    EXPUNGE unless the server supports UID EXPUNGE: a bare EXPUNGE removes every
+    \\Deleted message in the folder, including ones this call never touched.
     """
+    if not uids:
+        return {}
     selected = await client.client.select(f'"{source}"')
     if selected.result != "OK":
         raise ImapWriteError(f"cannot select {source}")
+    sequence = ",".join(str(uid) for uid in uids)
 
     capabilities = {item.upper() for item in getattr(client.client.protocol, "capabilities", set())}
     if "MOVE" in capabilities:
-        response = await client.client.uid("move", str(uid), f'"{destination}"')
+        response = await client.client.uid("move", sequence, f'"{destination}"')
         if response.result != "OK":
             raise ImapWriteError(f"MOVE to {destination} failed: {response.result}")
         return parse_copyuid(response.lines)
 
-    response = await client.client.uid("copy", str(uid), f'"{destination}"')
+    response = await client.client.uid("copy", sequence, f'"{destination}"')
     if response.result != "OK":
         raise ImapWriteError(f"COPY to {destination} failed: {response.result}")
-    new_uid = parse_copyuid(response.lines)
+    landed = parse_copyuid(response.lines)
 
-    marked = await client.client.uid("store", str(uid), "+FLAGS", "(\\Deleted)")
+    marked = await client.client.uid("store", sequence, "+FLAGS", "(\\Deleted)")
     if marked.result != "OK":
-        raise ImapWriteError(f"could not mark the original deleted in {source}")
+        raise ImapWriteError(f"could not mark the originals deleted in {source}")
     if "UIDPLUS" in capabilities:
-        await client.client.uid("expunge", str(uid))
+        await client.client.uid("expunge", sequence)
     else:
         logger.info(
-            "No UIDPLUS on this server; leaving the original in %s flagged \\Deleted "
-            "rather than expunging the whole folder",
+            "No UIDPLUS on this server; leaving %d original(s) in %s flagged "
+            "\\Deleted rather than expunging the whole folder",
+            len(uids),
             source,
         )
-    return new_uid
+    return landed
+
+
+async def create_folder(client, name: str) -> bool:
+    """Create a folder and subscribe to it. False if it already existed."""
+    existing = {folder["name"] for folder in await list_folders(client)}
+    if name in existing:
+        return False
+    response = await client.client.create(f'"{name}"')
+    if response.result != "OK":
+        detail = b" ".join(bytes(line) for line in response.lines if isinstance(line, (bytes, bytearray)))
+        raise ImapWriteError(f"CREATE {name} failed: {detail.decode('ascii', errors='ignore')}")
+    # Without SUBSCRIBE the folder exists but most clients will not show it.
+    await client.client.subscribe(f'"{name}"')
+    return True
 
 
 async def append_message(client, folder: str, raw: bytes, *, flags: list[str]) -> int | None:

@@ -206,13 +206,22 @@ can do here, over an index instead of a folder listing.
 | `get_attachment` | metadata, extracted text, expiring download URL |
 | `send_mail` | send or reply, with owned attachments |
 | `list_mail_folders` | folders of one mailbox, with declared roles and indexed counts |
-| `mark_mail` | set or clear read and flagged state |
-| `move_mail` | move a message to another folder |
-| `delete_mail` | move to Trash; `permanent` only from Trash |
+| `create_mail_folder` | create and subscribe to a folder |
+| `mark_mail` | set or clear read and flagged state, in bulk |
+| `move_mail` | move mail to another folder, in bulk |
+| `delete_mail` | move to Trash, in bulk; `permanent` only from Trash |
 | `save_draft` | write a draft into the mailbox's Drafts folder |
 
 Standalone connection tests and manual sync are deliberately outside the MCP
 surface.
+
+**Bulk.** `mark_mail`, `move_mail` and `delete_mail` select messages the same way
+`search_mail` does — pass `email_ids`, or the same filters to act on everything
+that matches. One call opens one connection and issues one command per folder, so
+clearing 8,000 newsletters is one call rather than 8,000. Each response reports
+`matched` against `affected`, and sets `truncated` when a limit cut the work
+short, so a partial batch is never mistaken for a finished one. A call with
+neither ids nor filters is refused rather than treated as "the whole mailbox".
 
 **Writes.** Every write goes to the mailbox first and is only recorded locally
 once the server confirms it, so the index never claims a change that did not

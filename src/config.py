@@ -39,7 +39,17 @@ class Settings(BaseSettings):
     tombstone_grace_days: int = 7
     # Matched as suffixes: real folders are "INBOX.Trash", "INBOX.SPAM",
     # "[Google Mail]/Trash". Exact names match almost nothing.
-    excluded_folder_suffixes: list[str] = ["trash", "spam", "junk", "deleted items", "papierkorb"]
+    # Gmail localises Trash as "Bin", Zoho calls it "Deleted Messages": a folder
+    # missing from this list keeps ranking as live mail after it is deleted.
+    excluded_folder_suffixes: list[str] = [
+        "trash",
+        "bin",
+        "spam",
+        "junk",
+        "deleted items",
+        "deleted messages",
+        "papierkorb",
+    ]
     gmail_page_size: int = 100
     gmail_backfill_pages_per_cycle: int = 5
     gmail_history_pages_per_cycle: int = 20
@@ -130,6 +140,10 @@ class Settings(BaseSettings):
     # in the mechanism -- leases, server confirmation before the local commit,
     # tombstones instead of destruction -- not in a switch.
     max_writes_per_minute: int = 30
+    # Messages one write call may touch. Bulk triage is the point -- an inbox with
+    # 8,000 newsletters cannot be cleaned one tool call at a time -- but an
+    # unbounded call would let a single mistake move an entire mailbox.
+    max_write_batch: int = 2_000
     # How long a write waits for a sync pass to release the mailbox before giving up.
     mail_write_lease_wait_seconds: float = 20.0
 

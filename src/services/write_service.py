@@ -11,6 +11,7 @@ so that no census is reading sequence numbers while the write lands.
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
@@ -27,8 +28,9 @@ from src.email.email_processor import (
 from src.email.imap_writer import (
     ImapWriteError,
     append_message,
+    create_folder,
     list_folders,
-    move_message,
+    move_messages,
     store_flags,
 )
 from src.email.message_flags import apply_flag_state
@@ -41,7 +43,8 @@ from src.services.mail_service import (
     is_excluded_folder,
     owned_account,
     owned_email,
-    serialize_email,
+    owned_email_query,
+    select_message_ids,
 )
 
 logger = logging.getLogger(__name__)
@@ -57,7 +60,12 @@ _recent_writes: dict[int, list[datetime]] = {}
 
 
 def _rate_limit(user_id: int) -> None:
-    """Per owner, mirroring send_mail. A global counter lets one tenant starve the rest."""
+    """Per owner, mirroring send_mail. A global counter lets one tenant starve the rest.
+
+    Counted per call rather than per message: one call moves a whole batch over one
+    connection, so charging per message would make triaging a mailbox impossible
+    while doing nothing about the actual cost, which is the round trip.
+    """
     now = datetime.now(tz=timezone.utc)
     window = now - timedelta(minutes=1)
     recent = [stamp for stamp in _recent_writes.get(user_id, []) if stamp > window]
@@ -101,88 +109,101 @@ def writable_placement(db: Session, message: EmailLog) -> MessagePlacement:
     return best
 
 
-def _writable_account(db: Session, user: User, message: EmailLog) -> SMTPConfig:
-    account = db.query(SMTPConfig).filter(SMTPConfig.id == message.smtp_config_id).one()
+def _assert_writable(account: SMTPConfig) -> None:
     if account.provider == "gmail" and account.auth_type == "oauth2":
         raise HTTPException(
             status_code=501,
-            detail="Gmail API accounts do not support flag writes yet",
+            detail="Gmail API accounts do not support writes yet",
         )
     if not account.credential_ciphertext:
         raise HTTPException(status_code=400, detail="Mailbox password is not configured")
-    return account
 
 
-async def mark_mail(db: Session, user: User, *, email_id: int, mark: str) -> dict:
-    """Set or clear one flag on a message, upstream first, then locally."""
-    if mark not in MARKS:
-        raise HTTPException(status_code=400, detail=f"Unknown mark: {mark}")
-    message = owned_email(db, user.id, email_id)
-    account = _writable_account(db, user, message)
-    placement = writable_placement(db, message)
-    _rate_limit(user.id)
 
-    add, remove = MARKS[mark]
-    # A sync pass holds the lease for seconds at a time, so a collision is
-    # ordinary rather than exceptional. Wait it out briefly instead of returning a
-    # failure the caller would only retry itself.
-    token = None
-    deadline = datetime.now(tz=timezone.utc) + timedelta(
-        seconds=settings.mail_write_lease_wait_seconds
-    )
-    while True:
-        token = acquire_mailbox_lease(db, account, seconds=settings.sync_lease_seconds)
-        if token or datetime.now(tz=timezone.utc) >= deadline:
-            break
-        await asyncio.sleep(1)
-    if not token:
+
+@dataclass
+class Selection:
+    """The messages one bulk operation will act on."""
+
+    account: SMTPConfig
+    targets: list[tuple[EmailLog, MessagePlacement]]
+    matched: int
+    skipped: list[dict]
+
+    @property
+    def by_folder(self) -> dict[str, list[tuple[EmailLog, MessagePlacement]]]:
+        grouped: dict[str, list[tuple[EmailLog, MessagePlacement]]] = {}
+        for message, placement in self.targets:
+            grouped.setdefault(placement.folder, []).append((message, placement))
+        return grouped
+
+
+def _select(db: Session, user: User, email_ids: list[int] | None, filters: dict, limit: int) -> Selection:
+    """Resolve either an explicit id list or a search into addressable messages."""
+    limit = max(1, min(limit, settings.max_write_batch))
+    if email_ids:
+        ids, matched = list(dict.fromkeys(email_ids))[:limit], len(set(email_ids))
+    else:
+        if not any(value not in (None, "", [], False) for value in filters.values()):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Supply email_ids, or filters describing which messages to act on. "
+                    "Refusing to act on an entire mailbox by default."
+                ),
+            )
+        ids, matched = select_message_ids(db, user, limit=limit, **filters)
+
+    messages = owned_email_query(db, user.id).filter(EmailLog.id.in_(ids)).all() if ids else []
+    found = {message.id for message in messages}
+    skipped = [{"email_id": missing, "reason": "not found"} for missing in set(ids) - found]
+
+    accounts = {message.smtp_config_id for message in messages}
+    if len(accounts) > 1:
         raise HTTPException(
-            status_code=409,
+            status_code=400,
             detail=(
-                "This mailbox has been synchronizing for longer than this write was "
-                "willing to wait; retry shortly"
+                f"These messages span {len(accounts)} mailboxes. Bulk operations run "
+                "against one mailbox at a time; pass account_id, or split the call."
             ),
         )
+    if not messages:
+        raise HTTPException(status_code=404, detail="No messages matched")
 
-    client = SMTPClient(SMTPConfig.create_detached(account))
-    try:
-        if not await client.connect():
-            raise HTTPException(status_code=502, detail="Could not connect to the mailbox")
-        try:
-            confirmed = await store_flags(
-                client, placement.folder, [placement.uid], add=add, remove=remove
-            )
-        except ImapWriteError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
-    finally:
-        # A cancelled aioimaplib command leaves pending_sync_command set and every
-        # later command, including logout, waits on it forever.
-        try:
-            await asyncio.wait_for(client.disconnect(), timeout=10)
-        except Exception as exc:
-            logger.warning("Discarding wedged IMAP session after write: %s", exc)
-        release_mailbox_lease(db, token)
+    account = db.query(SMTPConfig).filter(SMTPConfig.id == messages[0].smtp_config_id).one()
+    _assert_writable(account)
 
-    raw = confirmed.get(placement.uid)
-    if raw is None:
-        raise HTTPException(
-            status_code=502,
-            detail="The server did not confirm the new flags; nothing was changed locally",
-        )
-    apply_flag_state(message, raw)
-    db.commit()
-    db.refresh(message)
-    return {
+    targets = []
+    for message in messages:
+        try:
+            targets.append((message, writable_placement(db, message)))
+        except HTTPException as exc:
+            skipped.append({"email_id": message.id, "reason": exc.detail})
+    if not targets:
+        raise HTTPException(status_code=409, detail="No matched message could be addressed upstream")
+    return Selection(account=account, targets=targets, matched=matched, skipped=skipped)
+
+
+def _outcome(selection: Selection, limit: int, **extra) -> dict:
+    result = {
         "success": True,
-        "mark": mark,
-        "folder": placement.folder,
-        "message": serialize_email(message),
+        "account_id": selection.account.id,
+        "matched": selection.matched,
+        "affected": len(selection.targets),
+        "skipped": selection.skipped,
+        **extra,
     }
+    if selection.matched > len(selection.targets) + len(selection.skipped):
+        result["truncated"] = True
+        result["note"] = (
+            f"{selection.matched} messages matched but this call was limited to {limit}. "
+            "Repeat with the same filters to continue."
+        )
+    return result
 
 
 async def _with_mailbox(db: Session, account: SMTPConfig, operation):
     """Run one operation against a mailbox while holding its lease."""
-    token = None
     deadline = datetime.now(tz=timezone.utc) + timedelta(
         seconds=settings.mail_write_lease_wait_seconds
     )
@@ -205,6 +226,8 @@ async def _with_mailbox(db: Session, account: SMTPConfig, operation):
         except ImapWriteError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
     finally:
+        # A cancelled aioimaplib command leaves pending_sync_command set, and every
+        # later command on that connection -- including logout -- waits on it forever.
         try:
             await asyncio.wait_for(client.disconnect(), timeout=10)
         except Exception as exc:
@@ -212,11 +235,191 @@ async def _with_mailbox(db: Session, account: SMTPConfig, operation):
         release_mailbox_lease(db, token)
 
 
+async def mark_mail(
+    db: Session,
+    user: User,
+    *,
+    mark: str,
+    email_ids: list[int] | None = None,
+    limit: int = 500,
+    **filters,
+) -> dict:
+    """Set or clear a flag on one message or on everything matching a search."""
+    if mark not in MARKS:
+        raise HTTPException(status_code=400, detail=f"Unknown mark: {mark}")
+    _rate_limit(user.id)
+    selection = _select(db, user, email_ids, filters, limit)
+    add, remove = MARKS[mark]
+
+    async def operation(client):
+        confirmed: dict[str, dict[int, str]] = {}
+        for folder, group in selection.by_folder.items():
+            uids = [placement.uid for _message, placement in group]
+            confirmed[folder] = await store_flags(client, folder, uids, add=add, remove=remove)
+        return confirmed
+
+    confirmed = await _with_mailbox(db, selection.account, operation)
+
+    changed = 0
+    for folder, group in selection.by_folder.items():
+        for message, placement in group:
+            raw = confirmed.get(folder, {}).get(placement.uid)
+            # Nothing is recorded locally that the server did not confirm.
+            if raw is None:
+                selection.skipped.append({"email_id": message.id, "reason": "server did not confirm"})
+                continue
+            apply_flag_state(message, raw)
+            changed += 1
+    db.commit()
+    return _outcome(selection, limit, mark=mark, confirmed=changed)
+
+
+async def move_mail(
+    db: Session,
+    user: User,
+    *,
+    folder: str,
+    email_ids: list[int] | None = None,
+    limit: int = 500,
+    **filters,
+) -> dict:
+    """Move one message or a whole search result into another folder."""
+    _rate_limit(user.id)
+    selection = _select(db, user, email_ids, filters, limit)
+
+    async def operation(client):
+        names = {item["name"] for item in await list_folders(client)}
+        if folder not in names:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No folder named {folder!r} in this mailbox. Call list_mail_folders first.",
+            )
+        landed: dict[str, dict[int, int]] = {}
+        for source, group in selection.by_folder.items():
+            if source == folder:
+                continue
+            uids = [placement.uid for _message, placement in group]
+            landed[source] = await move_messages(client, source, uids, folder)
+        return landed
+
+    landed = await _with_mailbox(db, selection.account, operation)
+    return _outcome(selection, limit, to=folder, **_reflect_move(db, selection, folder, landed))
+
+
+def _reflect_move(db: Session, selection: Selection, destination: str, landed: dict) -> dict:
+    """Record a completed move locally, once the server has confirmed it."""
+    moved = unchanged = 0
+    for source, group in selection.by_folder.items():
+        if source == destination:
+            unchanged += len(group)
+            continue
+        for message, placement in group:
+            new_uid = landed.get(source, {}).get(placement.uid)
+            validity = placement.uid_validity
+            db.delete(placement)
+            if new_uid is not None:
+                upsert_placement(db, message.id, destination, new_uid, validity)
+            # Otherwise leave it unplaced: only a message that has a placement can
+            # be judged missing, so an unplaced message is never tombstoned, and
+            # the next sync pass files it where it now lives.
+            moved += 1
+    db.commit()
+    return {"moved": moved, "already_there": unchanged}
+
+
+async def delete_mail(
+    db: Session,
+    user: User,
+    *,
+    permanent: bool = False,
+    email_ids: list[int] | None = None,
+    limit: int = 500,
+    **filters,
+) -> dict:
+    """Move to Trash, or destroy messages already in Trash.
+
+    The rule a mail client uses: deleting from anywhere means Trash, and only
+    deleting from Trash removes anything.
+    """
+    _rate_limit(user.id)
+    selection = _select(db, user, email_ids, filters, limit)
+    suffixes = settings.excluded_folder_suffixes
+
+    if permanent:
+        outside = [
+            message.id
+            for message, placement in selection.targets
+            if not is_excluded_folder(placement.folder, suffixes)
+        ]
+        if outside:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"{len(outside)} of these messages are not in Trash yet. Send them "
+                    "there first; only a message already in Trash can be removed "
+                    "permanently."
+                ),
+            )
+
+        async def destroy(client):
+            for folder, group in selection.by_folder.items():
+                uids = [placement.uid for _message, placement in group]
+                await store_flags(client, folder, uids, add=["\\Deleted"], remove=[])
+                capabilities = {
+                    item.upper()
+                    for item in getattr(client.client.protocol, "capabilities", set())
+                }
+                if "UIDPLUS" in capabilities:
+                    await client.client.uid("expunge", ",".join(str(uid) for uid in uids))
+            return None
+
+        await _with_mailbox(db, selection.account, destroy)
+        now = datetime.now(tz=timezone.utc)
+        for message, placement in selection.targets:
+            db.delete(placement)
+            # Tombstone rather than drop the row: the grace period is what makes a
+            # mistaken deletion recoverable from the index.
+            message.deleted_at = now
+        db.commit()
+        return _outcome(selection, limit, permanent=True)
+
+    async def to_trash(client):
+        folders = await list_folders(client)
+        trash = _role_folder(folders, "trash", suffixes)
+        if not trash:
+            raise HTTPException(
+                status_code=409,
+                detail="This mailbox has no Trash folder; move the messages explicitly instead",
+            )
+        landed: dict[str, dict[int, int]] = {}
+        for source, group in selection.by_folder.items():
+            if is_excluded_folder(source, suffixes):
+                continue
+            uids = [placement.uid for _message, placement in group]
+            landed[source] = await move_messages(client, source, uids, trash)
+        return trash, landed
+
+    trash, landed = await _with_mailbox(db, selection.account, to_trash)
+    reflected = _reflect_move(db, selection, trash, landed)
+    return _outcome(selection, limit, permanent=False, to=trash, **reflected)
+
+
+async def create_mail_folder(db: Session, user: User, *, account_id: int, name: str) -> dict:
+    """Create a folder, so an agent can file mail somewhere that does not exist yet."""
+    account = owned_account(db, user.id, account_id)
+    _assert_writable(account)
+    cleaned = name.strip().strip('"')
+    if not cleaned or any(ch in cleaned for ch in '"\r\n'):
+        raise HTTPException(status_code=400, detail="Invalid folder name")
+    _rate_limit(user.id)
+    created = await _with_mailbox(db, account, lambda client: create_folder(client, cleaned))
+    return {"success": True, "account_id": account_id, "folder": cleaned, "created": created}
+
+
 async def list_mail_folders(db: Session, user: User, *, account_id: int) -> dict:
     """Every folder in one mailbox, so a move has real names to target."""
     account = owned_account(db, user.id, account_id)
-    if account.provider == "gmail" and account.auth_type == "oauth2":
-        raise HTTPException(status_code=501, detail="Gmail API accounts expose labels, not folders")
+    _assert_writable(account)
     folders = await _with_mailbox(db, account, lambda client: list_folders(client))
     counts = dict(
         db.query(MessagePlacement.folder, func.count())
@@ -238,101 +441,6 @@ def _role_folder(folders: list[dict], role: str, suffixes: list[str]) -> str | N
     return next((f["name"] for f in folders if is_excluded_folder(f["name"], suffixes)), None)
 
 
-async def move_mail(db: Session, user: User, *, email_id: int, folder: str) -> dict:
-    """Move a message to another folder in the same mailbox."""
-    message = owned_email(db, user.id, email_id)
-    account = _writable_account(db, user, message)
-    placement = writable_placement(db, message)
-    _rate_limit(user.id)
-    if placement.folder == folder:
-        return {"success": True, "unchanged": True, "folder": folder}
-
-    async def operation(client):
-        names = {item["name"] for item in await list_folders(client)}
-        if folder not in names:
-            raise HTTPException(
-                status_code=404,
-                detail=f"No folder named {folder!r} in this mailbox. Call list_mail_folders first.",
-            )
-        return await move_message(client, placement.folder, placement.uid, folder)
-
-    new_uid = await _with_mailbox(db, account, operation)
-
-    db.delete(placement)
-    if new_uid is not None:
-        upsert_placement(db, message.id, folder, new_uid, placement.uid_validity)
-    # Otherwise leave it unplaced: a message with no placement is never judged
-    # deleted, and the next sync pass files it where it now lives.
-    db.commit()
-    return {
-        "success": True,
-        "from": placement.folder,
-        "to": folder,
-        "uid_known": new_uid is not None,
-    }
-
-
-async def delete_mail(db: Session, user: User, *, email_id: int, permanent: bool = False) -> dict:
-    """Move a message to Trash, or remove it outright if it is already there.
-
-    Same rule a mail client uses: deleting from anywhere means Trash, and only
-    deleting from Trash destroys anything.
-    """
-    message = owned_email(db, user.id, email_id)
-    account = _writable_account(db, user, message)
-    placement = writable_placement(db, message)
-    _rate_limit(user.id)
-    suffixes = settings.excluded_folder_suffixes
-    in_trash = is_excluded_folder(placement.folder, suffixes)
-
-    if permanent and not in_trash:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"This message is in {placement.folder!r}, not Trash. Delete it first, "
-                "then delete it from Trash to remove it permanently."
-            ),
-        )
-
-    async def operation(client):
-        folders = await list_folders(client)
-        if permanent:
-            await store_flags(
-                client, placement.folder, [placement.uid], add=["\\Deleted"], remove=[]
-            )
-            capabilities = {
-                item.upper() for item in getattr(client.client.protocol, "capabilities", set())
-            }
-            if "UIDPLUS" in capabilities:
-                await client.client.uid("expunge", str(placement.uid))
-            return None
-        trash = _role_folder(folders, "trash", suffixes)
-        if not trash:
-            raise HTTPException(
-                status_code=409,
-                detail="This mailbox has no Trash folder; move the message explicitly instead",
-            )
-        return trash, await move_message(client, placement.folder, placement.uid, trash)
-
-    result = await _with_mailbox(db, account, operation)
-
-    if permanent:
-        db.delete(placement)
-        # Tombstone rather than delete the row: the grace period is what makes a
-        # mistaken deletion recoverable from the index.
-        message.deleted_at = datetime.now(tz=timezone.utc)
-        db.commit()
-        return {"success": True, "permanent": True, "from": placement.folder}
-
-    trash, new_uid = result
-    source = placement.folder
-    db.delete(placement)
-    if new_uid is not None:
-        upsert_placement(db, message.id, trash, new_uid, placement.uid_validity)
-    db.commit()
-    return {"success": True, "permanent": False, "from": source, "to": trash}
-
-
 async def save_draft(
     db: Session,
     user: User,
@@ -347,10 +455,7 @@ async def save_draft(
 ) -> dict:
     """Store a draft in the mailbox, where any mail client will pick it up."""
     account = owned_account(db, user.id, account_id)
-    if account.provider == "gmail" and account.auth_type == "oauth2":
-        raise HTTPException(status_code=501, detail="Gmail API accounts cannot append drafts yet")
-    if not account.credential_ciphertext:
-        raise HTTPException(status_code=400, detail="Mailbox password is not configured")
+    _assert_writable(account)
     _rate_limit(user.id)
 
     headers = {}
@@ -382,9 +487,7 @@ async def save_draft(
         folders = await list_folders(client)
         drafts = next((f["name"] for f in folders if f["special_use"] == "drafts"), None)
         if not drafts:
-            drafts = next(
-                (f["name"] for f in folders if f["name"].lower().endswith("drafts")), None
-            )
+            drafts = next((f["name"] for f in folders if f["name"].lower().endswith("drafts")), None)
         if not drafts:
             raise HTTPException(status_code=409, detail="This mailbox has no Drafts folder")
         return drafts, await append_message(client, drafts, raw, flags=["\\Draft", "\\Seen"])

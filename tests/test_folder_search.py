@@ -131,6 +131,19 @@ def test_the_cursor_is_bound_to_the_folder_scope(db):
         )
 
 
+def test_real_provider_trash_names_are_all_matched():
+    """Gmail says Bin, Zoho says Deleted Messages, Dovecot says INBOX.Trash."""
+    from src.config import settings
+
+    suffixes = settings.excluded_folder_suffixes
+
+    assert is_excluded_folder("[Google Mail]/Bin", suffixes)
+    assert is_excluded_folder("[Google Mail]/Spam", suffixes)
+    assert is_excluded_folder("Deleted Messages", suffixes)
+    assert is_excluded_folder("Papierkorb", suffixes)
+    assert not is_excluded_folder("[Google Mail]/All Mail", suffixes)
+
+
 def test_folder_matching_is_by_suffix_not_exact_name():
     suffixes = ["trash", "spam", "junk"]
 

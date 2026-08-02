@@ -108,7 +108,7 @@ async def test_another_owners_message_is_not_writable(db):
     other = db.query(User).filter(User.id == 2).one()
 
     with pytest.raises(HTTPException) as raised:
-        await mark_mail(db, other, email_id=100, mark="read")
+        await mark_mail(db, other, mark="read", email_ids=[100])
 
     assert raised.value.status_code == 404
 
@@ -116,7 +116,7 @@ async def test_another_owners_message_is_not_writable(db):
 @pytest.mark.asyncio
 async def test_an_unknown_mark_is_rejected_before_anything_is_opened(db):
     with pytest.raises(HTTPException):
-        await mark_mail(db, _user(db), email_id=100, mark="archived")
+        await mark_mail(db, _user(db), mark="archived", email_ids=[100])
 
 
 @pytest.mark.asyncio
@@ -128,7 +128,7 @@ async def test_a_write_refuses_while_the_mailbox_is_being_synchronised(db, monke
     assert held
 
     with pytest.raises(HTTPException) as raised:
-        await mark_mail(db, _user(db), email_id=100, mark="read")
+        await mark_mail(db, _user(db), mark="read", email_ids=[100])
 
     assert raised.value.status_code == 409
     release_mailbox_lease(db, held)
@@ -173,3 +173,81 @@ def test_batched_store_pairs_each_uid_with_its_own_flags():
         10: r"\Seen \Flagged",
         11: "",
     }
+
+
+@pytest.mark.asyncio
+async def test_a_bulk_call_refuses_to_act_on_everything_by_default(db):
+    """No ids and no filters must not mean "the whole mailbox"."""
+    db.add(MessagePlacement(email_log_id=100, folder="INBOX", uid=9, uid_validity=1))
+    db.commit()
+
+    with pytest.raises(HTTPException) as raised:
+        await mark_mail(db, _user(db), mark="read")
+
+    assert raised.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_messages_from_two_mailboxes_are_refused(db):
+    """One call, one connection: a mixed batch has no single mailbox to lease."""
+    _account(db, 2, owner=1, username="c@example.com", host="other.example.com")
+    db.add(
+        EmailLog(
+            id=101,
+            smtp_config_id=2,
+            sender="a@example.com",
+            recipient="b@example.com",
+            subject="Other",
+            provider_message_id="<n@x>",
+            message_id="<n@x>",
+        )
+    )
+    db.add_all(
+        [
+            MessagePlacement(email_log_id=100, folder="INBOX", uid=9, uid_validity=1),
+            MessagePlacement(email_log_id=101, folder="INBOX", uid=4, uid_validity=1),
+        ]
+    )
+    db.commit()
+
+    with pytest.raises(HTTPException) as raised:
+        await mark_mail(db, _user(db), mark="read", email_ids=[100, 101])
+
+    assert raised.value.status_code == 400
+    assert "one mailbox at a time" in raised.value.detail
+
+
+def test_a_batched_copyuid_maps_each_source_to_its_own_destination():
+    """Taking the first destination would file twenty messages under one UID."""
+    from src.email.imap_writer import expand_uid_set, parse_copyuid
+
+    assert expand_uid_set("3,7:9") == [3, 7, 8, 9]
+    assert parse_copyuid([b"OK [COPYUID 12345 3,7:9 100,201:203] Move completed"]) == {
+        3: 100,
+        7: 201,
+        8: 202,
+        9: 203,
+    }
+
+
+def test_a_truncated_batch_says_so():
+    """Silently doing 500 of 8,000 would read as a finished job."""
+    from src.models.smtp_config import SMTPConfig as Config
+    from src.services.write_service import Selection, _outcome
+
+    selection = Selection(account=Config(id=1), targets=[(None, None)] * 500, matched=8058, skipped=[])
+    outcome = _outcome(selection, 500)
+
+    assert outcome["truncated"] is True
+    assert outcome["matched"] == 8058
+    assert outcome["affected"] == 500
+    assert "8058" in outcome["note"]
+
+
+def test_a_complete_batch_does_not_claim_truncation():
+    from src.models.smtp_config import SMTPConfig as Config
+    from src.services.write_service import Selection, _outcome
+
+    selection = Selection(account=Config(id=1), targets=[(None, None)] * 3, matched=3, skipped=[])
+
+    assert "truncated" not in _outcome(selection, 500)

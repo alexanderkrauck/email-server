@@ -47,6 +47,7 @@ from src.services.mail_service import (
 from src.services.mail_service import (
     send_mail as send_message,
 )
+from src.services.write_service import create_mail_folder as create_folder_in
 from src.services.write_service import delete_mail as delete_message
 from src.services.write_service import list_mail_folders as load_folders
 from src.services.write_service import mark_mail as mark_message
@@ -107,6 +108,11 @@ def _password_setup_details(user_id: int, account) -> dict:
         ),
         "password_setup_expires_in": settings.password_setup_token_ttl_seconds,
     }
+
+
+SELECTION_DOC = (
+    'Selects messages the same way search_mail does: pass email_ids for specific messages, or the same filters (query, participants, folders, date_from/to, is_unread, has_attachments) to act on everything that matches. One call, one connection, one command per folder -- triaging thousands of newsletters does not mean thousands of tool calls. The response reports how many matched versus how many were affected, so a truncated batch is never mistaken for a finished one; repeat the same call to continue. '
+)
 
 
 def register_mcp_tools(mcp) -> None:
@@ -338,23 +344,52 @@ def register_mcp_tools(mcp) -> None:
     @mcp.tool(
         name="mark_mail",
         description=(
-            "Set or clear the read or flagged state of one message, in the mailbox "
-            "itself and then in the index. Acts on the live copy of the message, not "
-            "on a copy sitting in Trash. Refuses when the mailbox is mid-sync, when "
-            "the message has no known folder, or when the server does not confirm the "
-            "new flags -- in every refusal nothing is changed. Disabled unless the "
-            "operator has turned mailbox writes on."
+            "Set or clear the read or flagged state of mail, in the mailbox itself and "
+            "then in the index. " + SELECTION_DOC +
+            "Acts on the live copy of each message, not on a copy in Trash, and records "
+            "nothing locally that the server did not confirm."
         ),
         annotations=WRITE_EXTERNAL,
     )
     @mcp_error_boundary
     async def mark_mail(
-        email_id: int,
         mark: Literal["read", "unread", "flagged", "unflagged"],
+        email_ids: list[int] | None = None,
+        query: str = "",
+        account_id: int | None = None,
+        participants: list[str] | None = None,
+        folders: list[str] | None = None,
+        exclude_folders: list[str] | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        is_unread: bool | None = None,
+        is_flagged: bool | None = None,
+        has_attachments: bool = False,
+        search_attachments: bool = False,
+        match: Literal["stemmed", "exact"] = "stemmed",
+        limit: int = 500,
     ) -> dict:
         user = await current_mcp_user()
         with SessionLocal() as db:
-            return await mark_message(db, user, email_id=email_id, mark=mark)
+            return await mark_message(
+                db,
+                user,
+                mark=mark,
+                email_ids=email_ids,
+                query=query,
+                account_id=account_id,
+                participants=participants,
+                folders=folders,
+                exclude_folders=exclude_folders,
+                date_from=_date(date_from),
+                date_to=_date(date_to),
+                is_unread=is_unread,
+                is_flagged=is_flagged,
+                has_attachments=has_attachments,
+                search_attachments=search_attachments,
+                match=match,
+                limit=limit,
+            )
 
     @mcp.tool(
         name="list_mail_folders",
@@ -376,34 +411,118 @@ def register_mcp_tools(mcp) -> None:
     @mcp.tool(
         name="move_mail",
         description=(
-            "Move one message to another folder in the same mailbox. The folder must "
-            "already exist; use list_mail_folders to get its exact name. Acts on the "
-            "live copy, not on a copy in Trash. To delete, use delete_mail instead of "
-            "moving to Trash by hand."
+            "Move mail into another folder of the same mailbox. The folder must exist: "
+            "call list_mail_folders for exact names, or create_mail_folder first. " +
+            SELECTION_DOC +
+            "To delete, use delete_mail rather than moving to Trash by hand."
         ),
         annotations=WRITE_EXTERNAL,
     )
     @mcp_error_boundary
-    async def move_mail(email_id: int, folder: str) -> dict:
+    async def move_mail(
+        folder: str,
+        email_ids: list[int] | None = None,
+        query: str = "",
+        account_id: int | None = None,
+        participants: list[str] | None = None,
+        folders: list[str] | None = None,
+        exclude_folders: list[str] | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        is_unread: bool | None = None,
+        is_flagged: bool | None = None,
+        has_attachments: bool = False,
+        search_attachments: bool = False,
+        match: Literal["stemmed", "exact"] = "stemmed",
+        limit: int = 500,
+    ) -> dict:
         user = await current_mcp_user()
         with SessionLocal() as db:
-            return await move_message_to(db, user, email_id=email_id, folder=folder)
+            return await move_message_to(
+                db,
+                user,
+                folder=folder,
+                email_ids=email_ids,
+                query=query,
+                account_id=account_id,
+                participants=participants,
+                folders=folders,
+                exclude_folders=exclude_folders,
+                date_from=_date(date_from),
+                date_to=_date(date_to),
+                is_unread=is_unread,
+                is_flagged=is_flagged,
+                has_attachments=has_attachments,
+                search_attachments=search_attachments,
+                match=match,
+                limit=limit,
+            )
 
     @mcp.tool(
         name="delete_mail",
         description=(
-            "Move one message to Trash. This is reversible: the message stays in the "
-            "mailbox and in the index, filed under Trash, and search excludes Trash by "
-            "default. permanent=true removes it outright and is only allowed for a "
-            "message already in Trash, so deleting always takes two deliberate steps."
+            "Move mail to Trash. Reversible: the messages stay in the mailbox and in "
+            "the index, filed under Trash, and search excludes Trash by default. " +
+            SELECTION_DOC +
+            "permanent=true destroys them and is refused unless every selected message "
+            "is already in Trash, so removing mail always takes two deliberate steps."
         ),
         annotations=DESTRUCTIVE_EXTERNAL,
     )
     @mcp_error_boundary
-    async def delete_mail(email_id: int, permanent: bool = False) -> dict:
+    async def delete_mail(
+        permanent: bool = False,
+        email_ids: list[int] | None = None,
+        query: str = "",
+        account_id: int | None = None,
+        participants: list[str] | None = None,
+        folders: list[str] | None = None,
+        exclude_folders: list[str] | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        is_unread: bool | None = None,
+        is_flagged: bool | None = None,
+        has_attachments: bool = False,
+        search_attachments: bool = False,
+        match: Literal["stemmed", "exact"] = "stemmed",
+        limit: int = 500,
+    ) -> dict:
         user = await current_mcp_user()
         with SessionLocal() as db:
-            return await delete_message(db, user, email_id=email_id, permanent=permanent)
+            return await delete_message(
+                db,
+                user,
+                permanent=permanent,
+                email_ids=email_ids,
+                query=query,
+                account_id=account_id,
+                participants=participants,
+                folders=folders,
+                exclude_folders=exclude_folders,
+                date_from=_date(date_from),
+                date_to=_date(date_to),
+                is_unread=is_unread,
+                is_flagged=is_flagged,
+                has_attachments=has_attachments,
+                search_attachments=search_attachments,
+                match=match,
+                limit=limit,
+            )
+
+    @mcp.tool(
+        name="create_mail_folder",
+        description=(
+            "Create a folder in one mailbox, so mail can be filed somewhere that does "
+            "not exist yet. Subscribes to it, so other mail clients show it too. "
+            "Returns created=false if a folder of that name was already there."
+        ),
+        annotations=WRITE_EXTERNAL,
+    )
+    @mcp_error_boundary
+    async def create_mail_folder(account_id: int, name: str) -> dict:
+        user = await current_mcp_user()
+        with SessionLocal() as db:
+            return await create_folder_in(db, user, account_id=account_id, name=name)
 
     @mcp.tool(
         name="save_draft",

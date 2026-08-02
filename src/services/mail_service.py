@@ -668,6 +668,74 @@ def _lexical_matches(
     return matches, fields
 
 
+def select_message_ids(
+    db: Session,
+    user: User,
+    *,
+    query: str = "",
+    account_id: int | None = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    participants: list[str] | None = None,
+    has_attachments: bool = False,
+    search_attachments: bool = False,
+    folders: list[str] | None = None,
+    exclude_folders: list[str] | None = None,
+    is_unread: bool | None = None,
+    is_flagged: bool | None = None,
+    is_answered: bool | None = None,
+    match: str = "stemmed",
+    limit: int = 500,
+) -> tuple[list[int], int]:
+    """Ids matching the same filters search_mail uses, plus the true total.
+
+    Bulk operations need to act on a search, not on a list of ids: an inbox with
+    8,000 newsletters cannot be triaged by naming every message. Returning the
+    total separately is what lets a caller see that its limit truncated the work
+    rather than silently doing part of it.
+    """
+    q = owned_email_query(db, user.id).filter(EmailLog.deleted_at.is_(None))
+    q = _apply_common_filters(
+        q,
+        account_id=account_id,
+        date_from=date_from,
+        date_to=date_to,
+        participant=None,
+        has_attachments=has_attachments,
+    )
+    q = _apply_folder_scope(db, q, folders, exclude_folders)
+    condition = _participant_filter(
+        [term for term in (participants or []) if term and term.strip()]
+    )
+    if condition is not None:
+        q = q.filter(
+            EmailLog.id.in_(
+                select(db.query(MailParticipant.email_log_id).filter(condition).distinct().subquery())
+            )
+        )
+    if query.strip():
+        matched = match_condition(message_document(), query, match=match)
+        if search_attachments:
+            attachment_ids = (
+                db.query(EmailAttachment.email_log_id)
+                .filter(match_condition(attachment_document(), query, match=match))
+                .subquery()
+            )
+            matched = or_(matched, EmailLog.id.in_(select(attachment_ids)))
+        q = q.filter(matched)
+    q = _apply_flag_filters(
+        q, {"is_unread": is_unread, "is_flagged": is_flagged, "is_answered": is_answered}
+    )
+    total = q.order_by(None).count()
+    rows = (
+        q.with_entities(EmailLog.id)
+        .order_by(EmailLog.email_date.desc().nullslast(), EmailLog.id.desc())
+        .limit(max(1, limit))
+        .all()
+    )
+    return [row[0] for row in rows], int(total)
+
+
 def search_mail(
     db: Session,
     user: User,

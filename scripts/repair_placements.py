@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email import message_from_bytes, policy
 
-from sqlalchemy import bindparam, func, update
+from sqlalchemy import bindparam, func, or_, update
 
 from src.database.connection import SessionLocal
 from src.email.imap_writer import list_folders
@@ -39,6 +39,7 @@ from src.email.smtp_client import SMTPClient
 from src.models.email import EmailLog
 from src.models.placement import MessagePlacement
 from src.models.smtp_config import SMTPConfig
+from src.models.sync_cursor import MailSyncCursor
 from src.services.mail_service import is_excluded_folder
 
 logger = logging.getLogger("repair_placements")
@@ -161,14 +162,36 @@ async def plan_account(account: SMTPConfig, blind_rows: dict[str, list[int]]) ->
 
 
 def blind_rows(db, account_id: int) -> dict[str, list[int]]:
-    """Message-ID -> row ids, for rows with no placement and no folder."""
+    """Message-ID -> row ids, for messages with no usable location.
+
+    Two shapes qualify. A row with no placement at all, from before folders were
+    tracked. And a row whose every placement carries a UIDVALIDITY the folder has
+    since discarded: the UID is still there but now names a different message, so
+    it is no more addressable than having none.
+    """
+    current = (
+        db.query(MessagePlacement.email_log_id)
+        .join(EmailLog, EmailLog.id == MessagePlacement.email_log_id)
+        .outerjoin(
+            MailSyncCursor,
+            (MailSyncCursor.smtp_config_id == EmailLog.smtp_config_id)
+            & (MailSyncCursor.folder == MessagePlacement.folder),
+        )
+        .filter(
+            EmailLog.smtp_config_id == account_id,
+            or_(
+                MailSyncCursor.id.is_(None),
+                MessagePlacement.uid_validity.is_(None),
+                MessagePlacement.uid_validity == MailSyncCursor.uid_validity,
+            ),
+        )
+    )
     rows = (
         db.query(EmailLog.id, EmailLog.message_id)
         .filter(
             EmailLog.smtp_config_id == account_id,
             EmailLog.deleted_at.is_(None),
-            EmailLog.folder.is_(None),
-            ~EmailLog.id.in_(db.query(MessagePlacement.email_log_id)),
+            ~EmailLog.id.in_(current),
         )
         .all()
     )
@@ -198,6 +221,11 @@ def apply_repair(db, plan: AccountPlan, *, started_at: datetime) -> int:
                 .first()
             )
             if exists:
+                # A stale row for the same folder: correct it rather than skip it.
+                exists_row = db.get(MessagePlacement, exists[0])
+                if exists_row.uid != uid or exists_row.uid_validity != validity:
+                    exists_row.uid, exists_row.uid_validity = uid, validity
+                    written += 1
                 continue
             db.add(
                 MessagePlacement(

@@ -53,6 +53,7 @@ from src.email.smtp_client import SMTPClient
 from src.models.email import EmailLog
 from src.models.placement import MessagePlacement
 from src.models.smtp_config import SMTPConfig
+from src.models.sync_cursor import MailSyncCursor
 from src.models.user import User
 from src.services.mail_service import (
     is_excluded_folder,
@@ -90,17 +91,36 @@ def _rate_limit(user_id: int) -> None:
     _recent_writes[user_id] = recent
 
 
+def current_validities(db: Session, account_id: int) -> dict[str, int | None]:
+    """The UIDVALIDITY each folder last reported, per the sync cursors."""
+    return {
+        folder: validity
+        for folder, validity in db.query(
+            MailSyncCursor.folder, MailSyncCursor.uid_validity
+        ).filter(MailSyncCursor.smtp_config_id == account_id)
+    }
+
+
 def writable_placement(
-    db: Session, message: EmailLog, *, requires_uid: bool = True
+    db: Session,
+    message: EmailLog,
+    *,
+    requires_uid: bool = True,
+    validities: dict[str, int | None] | None = None,
 ) -> MessagePlacement:
     """The copy of a message a write should address.
 
     Prefer one that is addressable and outside Trash, so that marking a message
     read does not act on the deleted copy while the live one keeps its old state.
 
-    On IMAP, addressable means having a UID. Gmail messages have none -- they are
-    addressed by provider id, and the placement only records which location the
-    labels project to -- so requiring one there would refuse every write.
+    On IMAP, addressable means having a UID *in the numbering space the folder is
+    currently using*. A UIDVALIDITY change discards every UID, so writing to a
+    placement that still carries the old one would address whatever now happens
+    to hold that number -- a different message, or none. Those are ranked last
+    and refused rather than guessed at.
+
+    Gmail messages have no UID at all: they are addressed by provider id, and the
+    placement only records which location the labels project to.
     """
     placements = (
         db.query(MessagePlacement).filter(MessagePlacement.email_log_id == message.id).all()
@@ -116,10 +136,19 @@ def writable_placement(
             ),
         )
     suffixes = settings.excluded_folder_suffixes
+    known = validities or {}
+
+    def stale(placement: MessagePlacement) -> bool:
+        # A folder with no cursor has never been synced, so nothing is known
+        # about its numbering; that is not evidence of staleness.
+        if placement.folder not in known or placement.uid_validity is None:
+            return False
+        return placement.uid_validity != known[placement.folder]
+
     ranked = sorted(
         placements,
         key=lambda placement: (
-            requires_uid and placement.uid is None,
+            requires_uid and (placement.uid is None or stale(placement)),
             is_excluded_folder(placement.folder, suffixes),
             placement.folder or "",
         ),
@@ -127,6 +156,16 @@ def writable_placement(
     best = ranked[0]
     if requires_uid and best.uid is None:
         raise HTTPException(status_code=409, detail="This message has no upstream UID to address")
+    if requires_uid and stale(best):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"The only known location for this message is {best.folder!r} under a "
+                "UIDVALIDITY the server has since discarded, so its UID now names a "
+                "different message or none. Re-run scripts/repair_placements.py to "
+                "locate it again."
+            ),
+        )
     return best
 
 
@@ -195,10 +234,16 @@ def _select(db: Session, user: User, email_ids: list[int] | None, filters: dict,
     _assert_writable(account)
 
     requires_uid = not _is_gmail_api(account)
+    validities = current_validities(db, account.id) if requires_uid else {}
     targets = []
     for message in messages:
         try:
-            targets.append((message, writable_placement(db, message, requires_uid=requires_uid)))
+            targets.append((
+                message,
+                writable_placement(
+                    db, message, requires_uid=requires_uid, validities=validities
+                ),
+            ))
         except HTTPException as exc:
             skipped.append({"email_id": message.id, "reason": exc.detail})
     if not targets:

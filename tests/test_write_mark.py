@@ -292,3 +292,51 @@ def test_skipped_messages_are_grouped_by_reason():
     assert len(summary[0]["email_ids"]) == 20
     assert summary[0]["email_ids_truncated"] is True
     assert summary[1]["email_ids_truncated"] is False
+
+
+def test_a_uid_from_a_discarded_numbering_space_is_refused(db):
+    """After a UIDVALIDITY change that UID names a different message, or none."""
+    from src.models.sync_cursor import MailSyncCursor
+    from src.services.write_service import current_validities, writable_placement
+
+    db.add(MailSyncCursor(smtp_config_id=1, folder="INBOX", uid_validity=99, last_uid=10))
+    db.add(MessagePlacement(email_log_id=100, folder="INBOX", uid=9, uid_validity=1))
+    db.commit()
+    validities = current_validities(db, 1)
+
+    with pytest.raises(HTTPException) as raised:
+        writable_placement(db, db.get(EmailLog, 100), validities=validities)
+
+    assert raised.value.status_code == 409
+    assert "discarded" in raised.value.detail
+
+
+def test_a_current_placement_wins_over_a_stale_one(db):
+    from src.models.sync_cursor import MailSyncCursor
+    from src.services.write_service import current_validities, writable_placement
+
+    db.add_all(
+        [
+            MailSyncCursor(smtp_config_id=1, folder="INBOX", uid_validity=99, last_uid=10),
+            MailSyncCursor(smtp_config_id=1, folder="INBOX.Archive", uid_validity=7, last_uid=3),
+            MessagePlacement(email_log_id=100, folder="INBOX", uid=9, uid_validity=1),
+            MessagePlacement(email_log_id=100, folder="INBOX.Archive", uid=2, uid_validity=7),
+        ]
+    )
+    db.commit()
+
+    best = writable_placement(db, db.get(EmailLog, 100), validities=current_validities(db, 1))
+
+    assert best.folder == "INBOX.Archive"
+
+
+def test_a_folder_that_was_never_synced_is_not_called_stale(db):
+    """No cursor means nothing is known, which is not evidence of a change."""
+    from src.services.write_service import current_validities, writable_placement
+
+    db.add(MessagePlacement(email_log_id=100, folder="INBOX", uid=9, uid_validity=1))
+    db.commit()
+
+    assert writable_placement(
+        db, db.get(EmailLog, 100), validities=current_validities(db, 1)
+    ).folder == "INBOX"

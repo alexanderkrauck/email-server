@@ -99,13 +99,26 @@ class SMTPClient:
             if not imap_use_ssl and not imap_use_tls:
                 raise ValueError("Plaintext IMAP is disabled; configure SSL or STARTTLS")
 
+            # aioimaplib defaults every command to a 10 second timeout, which is
+            # generous for a login and far too tight for a FETCH over thousands of
+            # UIDs: that timeout is what surfaced as PROVIDER_SYNC_FAILED on the
+            # largest account.
+            from src.config import settings
+
+            timeout = settings.imap_command_timeout_seconds
+
             # Connect to IMAP server
             if imap_use_ssl:
                 self.client = aioimaplib.IMAP4_SSL(
-                    host=self.config.host, port=self.config.port, ssl_context=ssl_context
+                    host=self.config.host,
+                    port=self.config.port,
+                    ssl_context=ssl_context,
+                    timeout=timeout,
                 )
             else:
-                self.client = aioimaplib.IMAP4(host=self.config.host, port=self.config.port)
+                self.client = aioimaplib.IMAP4(
+                    host=self.config.host, port=self.config.port, timeout=timeout
+                )
 
             await self.client.wait_hello_from_server()
 
@@ -698,7 +711,17 @@ class SMTPClient:
             search = await self.client.search("ALL")
             if search.result != "OK":
                 raise RuntimeError(f"Failed to list messages while reconciling {folder}")
-            sequence_ids = search.lines[0].decode("ascii", errors="ignore").split() if search.lines else []
+            # Every data line, not just the first: a large SEARCH response is split
+            # across several, and reading only lines[0] reports a short folder --
+            # which the reconciler cannot distinguish from mail someone deleted.
+            # Non-digit tokens are aioimaplib's appended completion text.
+            sequence_ids = [
+                token
+                for line in search.lines
+                if isinstance(line, (bytes, bytearray))
+                for token in bytes(line).decode("ascii", errors="ignore").split()
+                if token.isdigit()
+            ]
             # aioimaplib recursively parses untagged responses, so bound each metadata-only FETCH.
             for start in range(0, len(sequence_ids), 200):
                 chunk = sequence_ids[start : start + 200]

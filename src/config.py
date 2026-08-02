@@ -29,7 +29,10 @@ class Settings(BaseSettings):
     # Email Processing
     email_check_interval: int = 30  # seconds
     max_emails_per_batch: int = 50
-    deletion_reconcile_interval: int = 21_600
+    # How often every folder is re-censused to mirror flags, moves and deletions.
+    # Six hours was chosen when a census loaded every message body; it no longer
+    # does, and read state that is six hours stale is not worth reporting.
+    deletion_reconcile_interval: int = 300
     # The reconciler always tombstones; physical removal happens after the grace
     # period, so a wrong deletion inference stays recoverable for a few days.
     upstream_delete_policy: Literal["hard_delete", "tombstone", "retain"] = "tombstone"
@@ -41,6 +44,9 @@ class Settings(BaseSettings):
     gmail_backfill_pages_per_cycle: int = 5
     gmail_history_pages_per_cycle: int = 20
     gmail_request_concurrency: int = 10
+    # aioimaplib's own default is 10s, which a metadata FETCH over a large folder
+    # exceeds routinely. A command that times out is reported as a sync failure.
+    imap_command_timeout_seconds: float = 60.0
     imap_backfill_messages_per_cycle: int = 500
     imap_max_message_size: int = 50 * 1024 * 1024
     sync_account_concurrency: int = 4

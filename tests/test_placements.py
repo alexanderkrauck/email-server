@@ -292,3 +292,49 @@ def test_a_handful_of_real_deletions_still_tombstones(db):
     )
 
     assert db.query(EmailLog).filter(EmailLog.deleted_at.is_not(None)).count() == 2
+
+
+def test_a_stale_uidvalidity_placement_is_retired_when_the_message_is_elsewhere(db):
+    """A renumbered folder leaves placements naming UIDs that no longer exist."""
+    from src.email.email_processor import apply_folder_snapshots
+
+    message = make_message(db)
+    db.add_all(
+        [
+            MessagePlacement(email_log_id=message.id, folder="INBOX", uid=7, uid_validity=1),
+            MessagePlacement(
+                email_log_id=message.id, folder="INBOX.Trash", uid=3, uid_validity=9
+            ),
+        ]
+    )
+    db.commit()
+
+    apply_folder_snapshots(
+        db,
+        config_id=1,
+        snapshots={
+            "INBOX": {"uid_validity": 9, "uids": set(), "flags": {}},
+            "INBOX.Trash": {"uid_validity": 9, "uids": {3}, "flags": {}},
+        },
+    )
+
+    assert {p.folder for p in db.query(MessagePlacement).all()} == {"INBOX.Trash"}
+    assert db.query(EmailLog).one().deleted_at is None
+
+
+def test_a_stale_placement_is_kept_when_it_is_the_only_one(db):
+    """Retiring it would unplace the message and make it look deleted."""
+    from src.email.email_processor import apply_folder_snapshots
+
+    message = make_message(db)
+    db.add(MessagePlacement(email_log_id=message.id, folder="INBOX", uid=7, uid_validity=1))
+    db.commit()
+
+    apply_folder_snapshots(
+        db,
+        config_id=1,
+        snapshots={"INBOX": {"uid_validity": 9, "uids": {4}, "flags": {}}},
+    )
+
+    assert db.query(MessagePlacement).count() == 1
+    assert db.query(EmailLog).one().deleted_at is None

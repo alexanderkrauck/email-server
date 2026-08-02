@@ -86,12 +86,26 @@ def apply_folder_snapshots(db, *, config_id: int, snapshots: dict) -> None:
     retired: list[int] = []
     observed: dict[int, tuple[tuple, str]] = {}
 
+    # A UIDVALIDITY change renumbers every UID, so a placement carrying the old
+    # value names nothing. Skipping it forever is what left 6,978 messages on one
+    # account filed in a folder they had already left, still ranked as live mail.
+    # It is only safe to retire such a placement when the message is addressable
+    # somewhere else, so that this can never be the step that unplaces a message
+    # and makes it look deleted.
+    addressable: set[int] = set()
+    for row in rows:
+        state = snapshots.get(row.folder)
+        # A folder the census could not see is not evidence of anything.
+        if state is None or row.uid_validity is None or row.uid_validity == state["uid_validity"]:
+            addressable.add(row.email_log_id)
+
     for row in rows:
         state = snapshots.get(row.folder)
         if state is None:
             continue
-        # A UIDVALIDITY change renumbers every UID; that is not a deletion.
         if row.uid_validity is not None and row.uid_validity != state["uid_validity"]:
+            if row.email_log_id in addressable:
+                retired.append(row.id)
             continue
         if row.uid not in state["uids"]:
             retired.append(row.id)

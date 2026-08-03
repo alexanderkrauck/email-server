@@ -16,8 +16,20 @@ permissions:
   id-token: write   # the MCP Registry authenticates this repo by GitHub OIDC
 
 jobs:
+  validate:
+    name: validate server.json
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      # Before the image is built, so a rejected entry costs a re-tag rather
+      # than eight minutes of QEMU.
+      - run: python -m scripts.validate_server_json --version "${GITHUB_REF_NAME#v}"
+
   image:
     name: publish image
+    needs: validate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -42,6 +42,10 @@ jobs:
       # directory, and no network. It must stay that way.
       - run: pytest -q
 
+      # The MCP Registry validates on publish, which is after the image is built
+      # and the tag exists. Catch it here instead.
+      - run: python -m scripts.validate_server_json
+
   migrations:
     name: alembic upgrade head
     runs-on: ubuntu-latest

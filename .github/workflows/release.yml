@@ -61,12 +61,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # docker/metadata-action strips the leading v, so the image tag is 0.1.0
+      # while the git ref is v0.1.0. Using the ref here hands people a pull
+      # command that fails with "manifest unknown".
+      - id: version
+        run: echo "number=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
       - uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           body: |
             ```bash
-            docker pull ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            docker pull ghcr.io/${{ github.repository }}:${{ steps.version.outputs.number }}
             ```
 
             See [CHANGELOG.md](CHANGELOG.md) for what changed and

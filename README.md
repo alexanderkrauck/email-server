@@ -1,5 +1,11 @@
 # mailindex-mcp
 
+[![release](https://img.shields.io/github/v/release/alexanderkrauck/mailindex-mcp?sort=semver)](https://github.com/alexanderkrauck/mailindex-mcp/releases)
+[![image](https://img.shields.io/badge/ghcr.io-mailindex--mcp-blue?logo=docker&logoColor=white)](https://github.com/alexanderkrauck/mailindex-mcp/pkgs/container/mailindex-mcp)
+[![CI](https://github.com/alexanderkrauck/mailindex-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/alexanderkrauck/mailindex-mcp/actions/workflows/ci.yml)
+[![licence: MIT](https://img.shields.io/badge/licence-MIT-green)](LICENSE)
+[![MCP](https://img.shields.io/badge/MCP-19%20tools-8A2BE2)](#mcp-tools)
+
 **A mail client for an AI agent. Everything you can do in Thunderbird — search,
 move, mark, delete, draft — over your own index, on your own machine.**
 
@@ -64,8 +70,20 @@ cp .env.example .env
 docker compose up -d
 ```
 
-That pulls `ghcr.io/alexanderkrauck/mailindex-mcp` rather than building. Add
-`--build` if you would rather compile it yourself; expect several minutes.
+That pulls `ghcr.io/alexanderkrauck/mailindex-mcp:latest` rather than building —
+amd64 and arm64, so a Raspberry Pi or an Apple Silicon machine works the same
+way. Add `--build` if you would rather compile it yourself; expect several
+minutes.
+
+**Pin a version** for anything you care about, since this is pre-1.0 and the
+schema still changes between releases:
+
+```bash
+MAILINDEX_IMAGE=ghcr.io/alexanderkrauck/mailindex-mcp:0.1.0 docker compose up -d
+```
+
+Note the image tag has no `v`: the git tag is `v0.1.0`, the image is `0.1.0`.
+`0.1` tracks the latest patch of that minor version.
 
 Check it came up:
 

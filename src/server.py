@@ -27,21 +27,61 @@ from src.web_pages import service_page
 logger = logging.getLogger(__name__)
 
 
+# Module level rather than app.state: /health lives on api_app, which is mounted
+# inside final_app, and a mounted sub-app gets its own state object. Reading the
+# flag off request.app there would always find it missing.
+DATABASE_READY = False
+
+
+async def _prepare_database(app: FastAPI) -> None:
+    """Migrate, then start syncing. Keep trying rather than dying.
+
+    A database that is briefly unreachable -- restarting alongside this
+    container, or a few seconds slower to accept connections -- used to abort
+    startup and leave Docker restarting the process in a loop. Nothing about the
+    MCP surface needs the database to be described, only to be used, so the
+    server now comes up either way and reports itself unhealthy until it can
+    actually serve.
+    """
+    delay = 2
+    while True:
+        try:
+            init_database()
+            break
+        except Exception as exc:
+            logger.error(
+                "Database is not ready (%s: %s); retrying in %ss",
+                type(exc).__name__,
+                exc,
+                delay,
+            )
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 60)
+
+    global DATABASE_READY
+    DATABASE_READY = True
+    app.state.processing_task = asyncio.create_task(email_processor.start_processing())
+
+
 @asynccontextmanager
 async def service_lifespan(app: FastAPI):
     logger.info("Starting Email Server")
-    init_database()
-    processing_task = asyncio.create_task(email_processor.start_processing())
-    app.state.processing_task = processing_task
+    app.state.processing_task = None
+    preparation = asyncio.create_task(_prepare_database(app))
     try:
         yield
     finally:
         logger.info("Shutting down Email Server")
+        preparation.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await preparation
         await email_processor.stop_processing()
         email_sender_manager.cleanup()
-        processing_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await processing_task
+        processing_task = getattr(app.state, "processing_task", None)
+        if processing_task:
+            processing_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await processing_task
 
 
 api_app = FastAPI(
@@ -59,7 +99,17 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 @api_app.get("/health")
 async def health_check():
-    return {"status": "healthy", "service": "email-server", "processor_active": email_processor.processing}
+    # 503 while the database is unreachable: the process is up and can describe
+    # itself, but it cannot answer a question about anyone's mail, and a health
+    # check that says otherwise is worse than no health check.
+    ready = DATABASE_READY
+    body = {
+        "status": "healthy" if ready else "degraded",
+        "service": "email-server",
+        "database": "ready" if ready else "unavailable",
+        "processor_active": email_processor.processing,
+    }
+    return JSONResponse(status_code=200 if ready else 503, content=body)
 
 
 api_app.include_router(email_router)

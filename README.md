@@ -94,6 +94,107 @@ For other clients, point them at `http://localhost:8002/mcp` over streamable HTT
 Then ask something your inbox search would struggle with — a phrase inside a PDF
 someone sent you three years ago works well.
 
+## Which setup do I need?
+
+Four ways people arrive at this, and the shortest honest path for each.
+
+### "I want to see if this is real" — 5 minutes, your laptop
+
+Everything runs locally, nothing to sign up for.
+
+```bash
+git clone https://github.com/alexanderkrauck/mailindex-mcp.git
+cd mailindex-mcp && cp .env.example .env
+docker compose up -d --build
+claude mcp add --transport http mail http://localhost:8002/mcp
+```
+
+Add a mailbox with an app password (see below), wait for it to sync, then ask
+your client something your inbox search would lose. **What you need:** Docker,
+and an app password from your provider. **What to expect:** the first build
+compiles psycopg2 and pulls ~130 MB of OCR language data, so it takes minutes,
+not seconds. Auth is off and Docker binds to `127.0.0.1` only — fine here,
+never expose it.
+
+### "I want this on my phone and laptop, every day" — one person, one server
+
+You need a small VPS and a domain. Caddy gets the TLS certificate for you.
+
+```bash
+cat > .env <<'ENV'
+EMAILSERVER_DOMAIN=mail.example.com
+POSTGRES_PASSWORD=...
+EMAILSERVER_API_TOKEN=...
+CREDENTIAL_ENCRYPTION_KEY=...
+SESSION_SECRET=...
+ENV
+docker compose -f docker-compose.single-user.yml up -d --build
+```
+
+Every value from `openssl rand -base64 32`; the API token must be at least 32
+characters or the server refuses to start. **What you need:** a VPS with ~2 GB
+RAM and disk for roughly 25 MB per 1,000 messages, a domain, and an app password
+per mailbox. **What to expect:** works with anything that sends an
+`Authorization` header — Claude Code, Cursor, `mcp-remote`. It will *not* work
+with the claude.ai or ChatGPT web connectors, which negotiate OAuth and cannot
+send a static token. If you want those, use the next one.
+
+### "My family/team should each have their own" — a few people
+
+Google OAuth, so each person signs in as themselves and sees only their own
+mailboxes.
+
+```bash
+docker compose -f docker-compose.production.yml up -d --build
+```
+
+**What you need:** everything above, plus a Google Cloud OAuth **Web
+application** with the two redirect URIs listed under [Deployment
+modes](#deployment-modes). **What to expect:** an unverified-app warning until
+you submit the consent screen, and a 100-user cap while unverified — neither
+matters at this size.
+
+> **Set `REGISTRATION_MODE=allowlist`.** With `open`, any Google account on
+> earth can register on your server and attach mailboxes, and
+> `ALLOWED_GOOGLE_EMAILS` is never read. Tenant isolation still keeps strangers
+> out of *your* mail, but they get an account on your box. This is the easiest
+> thing to get wrong on a public host.
+
+### "Could this be internal infrastructure?" — 500-person company
+
+Honestly: not yet, and here is exactly what is missing rather than a maybe.
+
+**What works today.** Run it for one team as a pilot using the Google setup
+above. Multi-tenancy is real and enforced at the query level — every row is
+owner-scoped, and ownership comes from the authenticated token rather than
+anything a caller supplies. Mailbox credentials are encrypted at rest and never
+returned. Attachment binaries are never stored.
+
+**What blocks a company-wide rollout.**
+
+| Gap | Why it matters |
+|---|---|
+| Login is Google OIDC only | No Entra ID, Okta, generic OIDC or SAML. If your directory is not Google, nobody can sign in. |
+| No provisioning or deprovisioning | Users self-register; there is no SCIM, no group mapping, and no way to revoke someone's index when they leave. |
+| No audit export | Sends are audited; reads, searches and mailbox writes are not, which most compliance reviews ask about. |
+| Single Postgres, single container | No HA, no read replicas, no horizontal sync workers. Backup and restore is your `pg_dump`. |
+| Attachment text sits in the database | Retention and legal hold are whatever you build. |
+
+If you are that person: the pilot is genuinely worth running, and the honest
+pitch internally is "a search index over our own mail, on our own hardware, that
+an assistant can use" — not "an approved platform".
+
+### Mailbox credentials, whichever setup you pick
+
+Signing in to this server grants access to nothing. Each mailbox is connected
+separately:
+
+- **Gmail** — either an app password over IMAP, or the Gmail OAuth flow via
+  `begin_gmail_connection`, which uses the Gmail API instead and survives label
+  changes better.
+- **Everything else** — an app password from the provider's security settings.
+  Never your login password.
+
 ## Deployment modes
 
 `EMAILSERVER_AUTH_MODE` picks how callers are authenticated. Mailbox credentials are

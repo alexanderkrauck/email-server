@@ -1,0 +1,21 @@
+name: Feature request
+description: Something you wanted to do and could not
+labels: [enhancement]
+body:
+  - type: textarea
+    id: task
+    attributes:
+      label: What were you trying to get your assistant to do?
+      description: The actual task, not the feature you think would enable it.
+      placeholder: File every invoice from 2024 into a folder per client.
+    validations: {required: true}
+  - type: textarea
+    id: blocked
+    attributes:
+      label: Where did it stop?
+      description: Which tool refused, returned nothing useful, or does not exist.
+    validations: {required: true}
+  - type: textarea
+    id: workaround
+    attributes:
+      label: What did you do instead?

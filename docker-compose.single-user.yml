@@ -33,6 +33,9 @@ services:
     restart: always
 
   email-server:
+    # Published image by default; `docker compose build` still works and
+    # `docker compose up --build` overrides it for local development.
+    image: ${MAILINDEX_IMAGE:-ghcr.io/alexanderkrauck/mailindex-mcp:latest}
     build: .
     depends_on:
       postgres:

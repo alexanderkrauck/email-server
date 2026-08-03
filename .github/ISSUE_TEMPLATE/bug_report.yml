@@ -1,0 +1,45 @@
+name: Bug report
+description: Something behaved wrongly against a real mailbox
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please do not report a security issue here — see SECURITY.md.
+  - type: input
+    id: provider
+    attributes:
+      label: Mail provider
+      description: Gmail over IMAP, Gmail OAuth, Zoho, Dovecot, Fastmail, iCloud, other
+      placeholder: Gmail over IMAP (app password)
+    validations: {required: true}
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Deployment mode
+      options: [development, single_user, google]
+    validations: {required: true}
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected instead
+      description: Include the tool call or API request if there was one, and the response.
+    validations: {required: true}
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      description: "`docker compose logs email-server --since 10m`. Redact addresses and subjects."
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: v0.1.0, or the output of `git rev-parse --short HEAD`
+    validations: {required: true}
+  - type: input
+    id: scale
+    attributes:
+      label: Roughly how much mail
+      description: Message count and number of accounts. Several bugs here only appear at scale.
+      placeholder: ~50,000 messages across 6 accounts

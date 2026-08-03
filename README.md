@@ -1,18 +1,27 @@
 # mailindex-mcp
 
-**Your mail, indexed and searchable, as a remote MCP server you host yourself.**
+**A mail client for an AI agent. Everything you can do in Thunderbird — search,
+move, mark, delete, draft — over your own index, on your own machine.**
 
-Most email MCP servers are a local process that forwards each question straight to
-IMAP. That works for "show me my last 10 messages" and falls apart on "find every
-invoice I was sent in 2024" — IMAP `SEARCH` is inconsistent between providers, it
-cannot see inside attachments, and it never tells the model whether it actually
-searched everything.
+Most email MCP servers forward each question straight to IMAP. That answers "show
+me my last 10 messages" and falls apart on everything else: `SEARCH` is
+inconsistent between providers, it cannot see inside attachments, it never tells
+the model whether it actually searched everything, and it cannot do a thing about
+what it finds.
 
-This one keeps its own copy. It syncs your mailboxes into PostgreSQL, extracts text
-from attachments, indexes all of it, and answers questions over that index with
-**exact counts, stable pagination, and an explicit report of how much of each
-mailbox it has seen**. It runs as an authenticated HTTP endpoint, so you paste a URL
-into your AI client instead of installing anything on your laptop.
+So when you ask an assistant to clear eight thousand newsletters out of your
+inbox, it tells you that would be eight thousand tool calls and suggests you go
+and do it by hand in the web interface.
+
+This one keeps its own copy of your mail and acts on it:
+
+```
+delete_mail(account_id=3, participants=["newsletter@example.com", ...])
+→ matched: 4147, affected: 4147, to: "[Google Mail]/Bin"
+```
+
+One call. One connection. Six seconds. That is the difference between a search
+box and a mail client.
 
 ![Claude answering a question about a mailbox through this server](docs/demo.gif)
 
@@ -23,19 +32,26 @@ accounts. One string is blurred: a case number belonging to a real filing.</sub>
 
 |  | This project | Typical email MCP |
 |---|---|---|
-| Transport | Remote HTTP endpoint | Local stdio process on your machine |
-| Setup on the client | Paste a URL | Install a runtime, edit config JSON, store credentials locally |
+| Can it change anything | Move, mark, delete, draft, manage folders — in bulk, by search | Read-only, or one message per call |
 | Search | Own PostgreSQL index, GIN full-text, stemmed across languages | Live IMAP `SEARCH` per call |
-| Writing | Move, mark, delete, draft — confirmed by the server before the index records it | Read-only, or unguarded |
 | Result completeness | Exact `total_count`, signed cursors, per-account coverage | Whatever the folder returned |
 | Attachments | Text extracted and indexed at sync time (PDF, DOCX, XLSX, PPTX, OCR) | Base64 into the model's context, or not at all |
 | Attachment binaries | Never stored; refetched through a 5-minute signed URL | Stored on disk or inlined |
+| Transport | Remote HTTP endpoint | Local stdio process on your machine |
+| Setup on the client | Paste a URL | Install a runtime, edit config JSON, store credentials locally |
 | Users | Multi-tenant, every row owner-scoped | Single user |
 | Tool surface | 19 tools, all annotated | Frequently 40+ |
 
-The trade is honest: you run a database and a container. In exchange the model can
-actually answer questions about your mail history, and your mail never leaves your
-own machine.
+**What it costs you, stated up front.** You run PostgreSQL and a container. The
+index is about **28 MB per 1,000 messages** — a 50,000-message archive is roughly
+1.5 GB — and the image is 1.25 GB because it carries OCR language data. The first
+sync downloads every message once; search works on what has arrived while the
+rest continues in the background, and each account reports its own coverage so
+the model knows what it has not seen yet.
+
+In exchange your assistant can answer questions about mail from years ago,
+including text inside attachments, and then act on the answer. None of it leaves
+your machine.
 
 ## Quickstart
 
@@ -45,8 +61,11 @@ Five minutes, local only, no accounts to create anywhere.
 git clone https://github.com/alexanderkrauck/mailindex-mcp.git
 cd mailindex-mcp
 cp .env.example .env
-docker compose up -d --build
+docker compose up -d
 ```
+
+That pulls `ghcr.io/alexanderkrauck/mailindex-mcp` rather than building. Add
+`--build` if you would rather compile it yourself; expect several minutes.
 
 Check it came up:
 
@@ -105,7 +124,7 @@ Everything runs locally, nothing to sign up for.
 ```bash
 git clone https://github.com/alexanderkrauck/mailindex-mcp.git
 cd mailindex-mcp && cp .env.example .env
-docker compose up -d --build
+docker compose up -d          # pulls the published image; add --build to compile it yourself
 claude mcp add --transport http mail http://localhost:8002/mcp
 ```
 
@@ -486,3 +505,11 @@ docker compose exec email-server python -m scripts.verify_postgres_search
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+## Contributing and security
+
+- [CONTRIBUTING.md](CONTRIBUTING.md) — how to run it, and what this project cares
+  about enough to argue with you over in review.
+- [SECURITY.md](SECURITY.md) — what is protected, what is not, and where to report
+  a vulnerability privately.
+- [CHANGELOG.md](CHANGELOG.md) — what changed between releases.

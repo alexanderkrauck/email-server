@@ -70,20 +70,24 @@ cp .env.example .env
 docker compose up -d
 ```
 
-That pulls `ghcr.io/alexanderkrauck/mailindex-mcp:latest` rather than building —
-amd64 and arm64, so a Raspberry Pi or an Apple Silicon machine works the same
-way. Add `--build` if you would rather compile it yourself; expect several
-minutes.
+Every compose file here pulls
+[`ghcr.io/alexanderkrauck/mailindex-mcp`](https://github.com/alexanderkrauck/mailindex-mcp/pkgs/container/mailindex-mcp)
+— amd64 and arm64, so a Raspberry Pi or an Apple Silicon machine works the same
+way. Append `--build` to any of them to compile it yourself instead; expect
+several minutes, because the image carries OCR language data.
 
-**Pin a version** for anything you care about, since this is pre-1.0 and the
-schema still changes between releases:
+**Pin a version** for anything you care about. This is pre-1.0: the schema
+changes between releases and migrations run automatically on start, so an
+unpinned `latest` can migrate your database the moment you restart.
 
 ```bash
 MAILINDEX_IMAGE=ghcr.io/alexanderkrauck/mailindex-mcp:0.1.0 docker compose up -d
 ```
 
-Note the image tag has no `v`: the git tag is `v0.1.0`, the image is `0.1.0`.
-`0.1` tracks the latest patch of that minor version.
+`MAILINDEX_IMAGE` works with all three compose files, and belongs in your `.env`
+rather than on the command line. Note the image tag has no `v` — the git tag is
+`v0.1.0`, the image is `0.1.0`, and `0.1` follows the latest patch of that minor
+version.
 
 Check it came up:
 
@@ -160,7 +164,7 @@ Everything runs locally, nothing to sign up for.
 ```bash
 git clone https://github.com/alexanderkrauck/mailindex-mcp.git
 cd mailindex-mcp && cp .env.example .env
-docker compose up -d          # pulls the published image; add --build to compile it yourself
+docker compose up -d          # pulls the published image
 claude mcp add --transport http mail http://localhost:8002/mcp
 ```
 
@@ -183,7 +187,7 @@ EMAILSERVER_API_TOKEN=...
 CREDENTIAL_ENCRYPTION_KEY=...
 SESSION_SECRET=...
 ENV
-docker compose -f docker-compose.single-user.yml up -d --build
+docker compose -f docker-compose.single-user.yml up -d
 ```
 
 Every value from `openssl rand -base64 32`; the API token must be at least 32
@@ -200,7 +204,7 @@ Google OAuth, so each person signs in as themselves and sees only their own
 mailboxes.
 
 ```bash
-docker compose -f docker-compose.production.yml up -d --build
+docker compose -f docker-compose.production.yml up -d
 ```
 
 **What you need:** everything above, plus a Google Cloud OAuth **Web
@@ -274,7 +278,7 @@ CREDENTIAL_ENCRYPTION_KEY=...
 SESSION_SECRET=...
 ENV
 
-docker compose -f docker-compose.single-user.yml up -d --build
+docker compose -f docker-compose.single-user.yml up -d
 ```
 
 Generate each secret with `openssl rand -base64 32`. `EMAILSERVER_API_TOKEN` must be
@@ -314,7 +318,7 @@ REGISTRATION_MODE=allowlist
 ALLOWED_GOOGLE_EMAILS=["owner@example.com"]
 ENV
 
-docker compose -f docker-compose.production.yml up -d --build
+docker compose -f docker-compose.production.yml up -d
 ```
 
 Add `https://mail.example.com/mcp` in the client. It receives an OAuth challenge,

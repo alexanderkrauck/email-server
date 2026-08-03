@@ -58,6 +58,8 @@ migrations run automatically on start, and there is no backporting.
 ### Operations
 
 - Published image at `ghcr.io/alexanderkrauck/mailindex-mcp`, amd64 and arm64.
+  The image tag omits the leading `v`: this release is `0.1.0`, and `0.1` follows
+  its patches.
 - `single_user` mode: one owner, a static bearer token, no Google project.
 - MIT licence, CI on every push, and migrations verified against PostgreSQL
   from an empty database on every run.

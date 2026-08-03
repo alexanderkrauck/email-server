@@ -116,10 +116,15 @@ jobs:
               db.add(account)
               db.flush()
               insert = text(
+                  # content_state is NOT NULL with a Python-side ORM default, so
+                  # raw SQL has to supply it. Every other NOT NULL column is named
+                  # here for the same reason.
                   "INSERT INTO email_logs (smtp_config_id, sender, recipient, subject,"
-                  " message_id, provider_message_id, folder, imap_uid, uid_validity, flags)"
+                  " message_id, provider_message_id, folder, imap_uid, uid_validity,"
+                  " flags, content_state)"
                   " VALUES (:account, 'a@example.invalid', 'b@example.invalid', 'ci',"
-                  " :message_id, :provider_message_id, :folder, :uid, 1, :flags)"
+                  " :message_id, :provider_message_id, :folder, :uid, 1, :flags,"
+                  " 'complete')"
               )
               rows = [
                   ("<ci@example.invalid>", "INBOX:1:1", "INBOX", 1, None),

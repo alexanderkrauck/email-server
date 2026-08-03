@@ -1,4 +1,4 @@
-# Email Server
+# mailindex-mcp
 
 **Your mail, indexed and searchable, as a remote MCP server you host yourself.**
 
@@ -42,8 +42,8 @@ own machine.
 Five minutes, local only, no accounts to create anywhere.
 
 ```bash
-git clone https://github.com/alexanderkrauck/email-server.git
-cd email-server
+git clone https://github.com/alexanderkrauck/mailindex-mcp.git
+cd mailindex-mcp
 cp .env.example .env
 docker compose up -d --build
 ```

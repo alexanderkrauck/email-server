@@ -75,3 +75,6 @@ logs/
 *.tmp
 *.temp
 .cache/
+
+# Working notes from planning sessions; not part of the project.
+docs/superpowers/

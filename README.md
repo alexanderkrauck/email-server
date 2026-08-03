@@ -77,10 +77,37 @@ The default `development` mode is **unauthenticated** and Docker binds it to
 `127.0.0.1` only. It is meant for exactly this: trying the thing out on your own
 machine.
 
+### Connect your AI client
+
+Do this before connecting a mailbox — it is how you connect one.
+
+```bash
+claude mcp add --transport http mail http://localhost:8002/mcp
+```
+
+For other clients, point them at `http://localhost:8002/mcp` over streamable HTTP.
+Then ask something your inbox search would struggle with — a phrase inside a PDF
+someone sent you three years ago works well.
+
 ### Connect a mailbox
 
-Use an app password, not your login password. Gmail, Zoho, Fastmail, iCloud and
-most other providers issue these in their security settings.
+Just ask your client — `add_mail_account` is one of the tools:
+
+> Connect my mailbox you@example.com, IMAP imap.example.com, SMTP
+> smtp.example.com
+
+**Do not give it the password.** Asked without one, it hands you back a
+short-lived URL to a form that asks for the password alone and sends it from
+your browser straight to the server. It never passes through the model, never
+lands in the conversation transcript your AI provider keeps, and it is the only
+way that works with clients such as ChatGPT that refuse to transmit secrets.
+
+Use an **app password** from your provider's security settings, never your
+account login password. For Gmail, ask it to start the Gmail OAuth flow instead:
+that uses the Gmail API and survives label changes better.
+
+<details>
+<summary>Or over HTTP, if you prefer a shell</summary>
 
 ```bash
 curl -X POST http://localhost:8002/api/v1/accounts \
@@ -97,21 +124,12 @@ curl -X POST http://localhost:8002/api/v1/accounts \
   }'
 ```
 
-Synchronization starts on its own. Watch it fill up:
+</details>
 
-```bash
-docker compose logs -f email-server
-```
-
-### Connect your AI client
-
-```bash
-claude mcp add --transport http mail http://localhost:8002/mcp
-```
-
-For other clients, point them at `http://localhost:8002/mcp` over streamable HTTP.
-Then ask something your inbox search would struggle with — a phrase inside a PDF
-someone sent you three years ago works well.
+Synchronization starts on its own and runs in the background. Search works on
+what has arrived already — ask **"how much of my mail have you indexed so far?"**
+and it will tell you exactly, per account, because every search reports its own
+coverage rather than pretending to be complete.
 
 ## Which setup do I need?
 

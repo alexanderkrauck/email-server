@@ -135,10 +135,22 @@ def register_mcp_tools(mcp) -> None:
     @mcp.tool(
         name="add_mail_account",
         description=(
-            "Add an IMAP/SMTP mailbox owned by the signed-in user. Password is optional: "
-            "supply it directly when supported, or omit it and open the returned "
-            "password-only setup URL. Configuration is retained when connection tests "
-            "fail. Use begin_gmail_connection instead for Gmail OAuth."
+            "Add an IMAP/SMTP mailbox owned by the signed-in user.\n\n"
+            "PREFER OMITTING THE PASSWORD. Called without one, this returns a "
+            "short-lived URL to a form that asks for the password alone and sends "
+            "it from the browser straight to the server. That is the safest path "
+            "and the one to offer first: a password passed as an argument travels "
+            "through this conversation and is retained in the transcript by "
+            "whichever client is running, and some clients refuse to transmit "
+            "secrets at all. Give the user the URL rather than asking them to "
+            "type a password to you.\n\n"
+            "Pass the password directly only when the user has already supplied "
+            "it unprompted, or explicitly asks to do it that way.\n\n"
+            "Use an app password from the provider's security settings, never an "
+            "account login password. For Gmail prefer begin_gmail_connection, "
+            "which uses OAuth and the Gmail API. Configuration is retained when a "
+            "connection test fails, so settings can be corrected without "
+            "re-entering the credential."
         ),
         annotations=WRITE_EXTERNAL,
     )
@@ -188,9 +200,15 @@ def register_mcp_tools(mcp) -> None:
     @mcp.tool(
         name="update_mail_account",
         description=(
-            "Update one owned mailbox configuration. Omitted fields remain unchanged. "
-            "A supplied password is write-only, encrypted at rest, and never returned. "
-            "Saved settings and credentials are retained when a connection test fails."
+            "Update one owned mailbox configuration. Omitted fields remain unchanged.\n\n"
+            "To change a password, prefer begin_mail_account_password_setup: it "
+            "returns a short-lived URL to a password-only form, so the credential "
+            "never passes through this conversation or the client's transcript. "
+            "Pass password here only when the user has already supplied it "
+            "unprompted or explicitly asks to.\n\n"
+            "A supplied password is write-only, encrypted at rest, and never "
+            "returned. Saved settings and credentials are retained when a "
+            "connection test fails."
         ),
         annotations=WRITE_EXTERNAL,
     )
@@ -246,8 +264,12 @@ def register_mcp_tools(mcp) -> None:
         name="begin_mail_account_password_setup",
         description=(
             "Create a short-lived browser URL that asks only for the password of an "
-            "existing IMAP/SMTP account. Use this when the MCP client will not transmit "
-            "passwords. The password is stored independently of connection-test results."
+            "existing IMAP/SMTP account. This is the preferred way to set or change "
+            "any mailbox password: the credential goes from the browser straight to "
+            "the server, so it never enters this conversation or the client's "
+            "transcript, and it works with clients that refuse to transmit secrets "
+            "at all. The password is stored independently of connection-test "
+            "results."
         ),
         annotations=WRITE_EXTERNAL,
     )

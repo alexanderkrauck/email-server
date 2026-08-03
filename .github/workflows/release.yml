@@ -87,10 +87,18 @@ jobs:
           for package in server.get("packages", []):
               identifier, _, _tag = package["identifier"].rpartition(":")
               package["identifier"] = f"{identifier}:{version}"
-              package["version"] = version
+              # An OCI package carries its version in the tag. Setting the field
+              # as well is rejected outright.
+              if package.get("registryType") == "oci":
+                  package.pop("version", None)
+              else:
+                  package["version"] = version
           path.write_text(json.dumps(server, indent=2) + "\n")
           print(json.dumps(server, indent=2))
           PY
+
+      # Validate the rewritten file: the committed one is not what gets sent.
+      - run: python -m scripts.validate_server_json --version "${GITHUB_REF_NAME#v}"
 
       - name: Install mcp-publisher
         run: |

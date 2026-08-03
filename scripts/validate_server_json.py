@@ -72,6 +72,11 @@ def problems(server: dict, *, expected_version: str | None, dockerfile: str) -> 
                 found.append(f"{where}: identifier needs an explicit tag, got {identifier!r}")
             elif version and tag != version:
                 found.append(f"{where}: image tag {tag!r} does not match version {version!r}")
+            if "version" in package:
+                found.append(
+                    f"{where}: an OCI package must not carry a version field; the tag in "
+                    "identifier is its version"
+                )
         if not package.get("transport", {}).get("type"):
             found.append(f"{where}: transport.type is required")
 

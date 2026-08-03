@@ -13,6 +13,7 @@ on:
 permissions:
   contents: write
   packages: write
+  id-token: write   # the MCP Registry authenticates this repo by GitHub OIDC
 
 jobs:
   image:
@@ -51,6 +52,44 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  registry:
+    name: publish to the MCP Registry
+    needs: image
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+
+      # server.json carries the version and the image tag it describes. Deriving
+      # both from the tag keeps them from drifting, which is the failure the
+      # registry rejects rather than silently accepts.
+      - name: Point server.json at this release
+        run: |
+          python - <<'PY'
+          import json, os, pathlib
+          version = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          path = pathlib.Path("server.json")
+          server = json.loads(path.read_text())
+          server["version"] = version
+          for package in server.get("packages", []):
+              identifier, _, _tag = package["identifier"].rpartition(":")
+              package["identifier"] = f"{identifier}:{version}"
+              package["version"] = version
+          path.write_text(json.dumps(server, indent=2) + "\n")
+          print(json.dumps(server, indent=2))
+          PY
+
+      - name: Install mcp-publisher
+        run: |
+          curl -sSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr A-Z a-z)_$(uname -m | sed 's/x86_64/amd64/').tar.gz" \
+            | tar xz mcp-publisher
+          ./mcp-publisher --version
+
+      - name: Publish
+        run: |
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish
 
   release:
     name: draft notes

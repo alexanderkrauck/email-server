@@ -1,5 +1,13 @@
 FROM python:3.11-alpine
 
+# The MCP Registry verifies image ownership by reading this annotation and
+# matching it against the name in server.json. Without it, publishing is
+# rejected as unverifiable.
+LABEL io.modelcontextprotocol.server.name="io.github.alexanderkrauck/mailindex-mcp"
+LABEL org.opencontainers.image.source="https://github.com/alexanderkrauck/mailindex-mcp"
+LABEL org.opencontainers.image.licenses="MIT"
+LABEL org.opencontainers.image.description="A mail client for an AI agent: search, move, mark, delete and draft real mail over a self-hosted index."
+
 # OCR languages baked into the image. Tesseract cannot read a script it has no
 # data for, and with no language it assumes English and mangles every accented
 # word, so the default covers the Latin-script languages most mail is written

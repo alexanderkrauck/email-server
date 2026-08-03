@@ -1,0 +1,52 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.alexanderkrauck/mailindex-mcp",
+  "title": "mailindex-mcp",
+  "description": "A mail client for an AI agent: search, move, mark, delete and draft real mail over a self-hosted index. Syncs IMAP and Gmail into PostgreSQL, extracts and OCRs attachment text, and answers with exact counts and stable pagination. Requires a PostgreSQL database alongside the container; see the repository for compose files.",
+  "version": "0.1.1",
+  "websiteUrl": "https://github.com/alexanderkrauck/mailindex-mcp",
+  "repository": {
+    "url": "https://github.com/alexanderkrauck/mailindex-mcp",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/alexanderkrauck/mailindex-mcp:0.1.1",
+      "transport": {
+        "type": "streamable-http",
+        "url": "http://localhost:8002/mcp"
+      },
+      "environmentVariables": [
+        {
+          "name": "EMAILSERVER_DATABASE_URL",
+          "description": "PostgreSQL connection URL. This server keeps its own index and does not run without a database; the repository ships docker-compose files that start one for you.",
+          "isRequired": true,
+          "format": "string"
+        },
+        {
+          "name": "EMAILSERVER_AUTH_MODE",
+          "description": "How callers are authenticated: development (no auth, loopback only), single_user (static bearer token), or google (multi-user OAuth).",
+          "default": "development"
+        },
+        {
+          "name": "EMAILSERVER_API_TOKEN",
+          "description": "Bearer token required in single_user mode. At least 32 characters, or the server refuses to start.",
+          "isSecret": true
+        },
+        {
+          "name": "CREDENTIAL_ENCRYPTION_KEY",
+          "description": "Key used to encrypt stored mailbox credentials at rest. Generate with: openssl rand -base64 32",
+          "isSecret": true
+        }
+      ]
+    }
+  ],
+  "_meta": {
+    "io.modelcontextprotocol.registry/publisher-provided": {
+      "com.github": {
+        "serverDisplayName": "mailindex-mcp"
+      }
+    }
+  }
+}
